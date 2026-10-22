@@ -2,6 +2,7 @@
 
 口径：扫描文档根下全部 `.md` 的相对链接——目标文件存在、锚点在目标内以 `id="…"` 出现。
 跳过外部链接、行内代码与配置声明的本地凭据目录（那类文档不入库，存在与否不代表断链）。
+链接目标按 URL 编码解码后再比较（`%20` 等是 Markdown 合法写法，目录名含空格时必须解码）。
 """
 
 from __future__ import annotations
@@ -9,6 +10,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import unquote
 
 from .config import Config
 
@@ -113,7 +115,9 @@ def check(cfg: Config) -> LinkReport:
                 if not target or target.startswith(_IGNORED_SCHEMES):
                     continue
                 rel_path, _, anchor = target.partition("#")
-                rel_path = rel_path.lstrip("?")
+                # URL 编码解码：目录名含空格 / 中文时链接写作 `a%20b`，按编码比较会全部误判断链
+                rel_path = unquote(rel_path).lstrip("?")
+                anchor = unquote(anchor)
                 if not rel_path:
                     continue
                 resolved = (path.parent / rel_path).resolve()

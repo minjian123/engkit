@@ -41,6 +41,31 @@ def test_check_broken_and_anchor(build_repo) -> None:
     assert report.broken == 1 and report.anchors == 1
 
 
+def test_check_percent_encoded_path(build_repo) -> None:
+    """链接目标按 URL 编码解码后比较（目录名含空格写成 `%20` 不算断链）。"""
+    root = build_repo(
+        files={
+            "docs/01_阶段 一/入口.md": "# 入口\n\n[a](../总览.md)\n",
+            "docs/总览.md": "# 总览\n",
+            "docs/引用.md": "# 引用\n\n[a](01_阶段%20一/入口.md)\n",
+        }
+    )
+    report = docs_links.check(load(root / "engkit.toml"))
+    assert report.broken == 0 and report.anchors == 0
+
+
+def test_check_percent_encoded_anchor(build_repo) -> None:
+    """锚点同样按 URL 编码解码（中文锚点编码后仍能命中）。"""
+    root = build_repo(
+        files={
+            "docs/规范/规范.md": '# 规范\n\n<a id="定稿"></a>\n',
+            "docs/引用.md": "# 引用\n\n[a](规范/规范.md#%E5%AE%9A%E7%A8%BF)\n",
+        }
+    )
+    report = docs_links.check(load(root / "engkit.toml"))
+    assert report.anchors == 0
+
+
 def test_check_skips_external_and_inline(build_repo) -> None:
     """外部链接、行内代码与纯锚点不算问题。"""
     root = build_repo(

@@ -46,6 +46,7 @@ def test_package_has_no_repo_literals() -> None:
     assert offenders == []
 
 
+@pytest.mark.kiwi_id(2319)
 def test_single_source_selection() -> None:
     """选测推导只有一份实现（其他模块只调用）。"""
     definers: list[str] = []
@@ -61,6 +62,7 @@ def test_single_source_selection() -> None:
     assert "selection.build_selection(" in (SRC / "preflight.py").read_text(encoding="utf-8")
 
 
+@pytest.mark.kiwi_id(2319)
 def test_unregistered_project_detected(build_repo) -> None:
     """新增工程未登记到全量范围 / 覆盖率范围即被检出。"""
     root = build_repo(
@@ -72,6 +74,7 @@ def test_unregistered_project_detected(build_repo) -> None:
     assert any("覆盖率采集范围" in item for item in missing)
 
 
+@pytest.mark.kiwi_id(2319)
 def test_degradation_is_explicit(cfg) -> None:
     """退化必须给出原因（不静默）。"""
     forced = selection.build_selection(cfg, [], force_full=True)
@@ -82,6 +85,7 @@ def test_degradation_is_explicit(cfg) -> None:
     assert any("超过基础模块阈值" in item for item in degraded.notes)
 
 
+@pytest.mark.kiwi_id(2319)
 def test_expansion_never_silent(cfg, monkeypatch) -> None:
     """扩圈不收敛时不得静默放过（返回非零，不假装通过）。"""
     import dataclasses
