@@ -1,0 +1,39 @@
+# engkit 仓自身配置（自举烟雾 job 使用；正式门禁由 CI 直跑 pytest / ruff / pyright）
+# 口径：包内不含任何仓名与目录字面，仓结构一律由本文件声明（见 engkit文档/概述/工程化工具包说明.md）。
+
+[repo]
+name = "engkit"
+
+[docs]
+root = "engkit文档"
+
+[docs.scope]
+whitelist_dirs = ["规范/", "概述/", "接入说明/"]
+
+[pytest]
+cmd = "uv run pytest"
+cwd = "."
+
+[coverage]
+fail_under = 100
+plugin = ""
+data_file = ".coverage"
+
+[preflight]
+# 自举烟雾：只跑静态与工具链自检（用例与覆盖率由 base-gate 直跑，不在此重复）
+steps = [
+  { label = "静态：ruff check", cmd = ["uv", "run", "ruff", "check", "."] },
+  { label = "静态：ruff format --check", cmd = ["uv", "run", "ruff", "format", "--check", "."] },
+  { label = "静态：pyright", cmd = ["uv", "run", "pyright", "--outputjson"] },
+]
+
+[guard]
+scripts = []
+repo_dirs = ["src", "tests"]
+dir_test_threshold = 20
+
+[kiwi]
+env_file = "deploy/.env"
+host_env = "MJBK_IP"
+user_env = "MJBK_SSH_USER"
+container = "bms-kiwi"

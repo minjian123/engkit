@@ -1,0 +1,48 @@
+# engkit 流水线：**双轨门禁**
+#   1. base-gate：基础门禁直跑（pytest + 覆盖率 100% + ruff + pyright），**不依赖 engkit 自身**——
+#      引擎出问题时它仍能给出真实结果；
+#   2. self-host-smoke：自举烟雾（`engkit preflight --fast` 跑本仓 engkit.toml 声明的静态步骤），
+#      验证「换个仓仍可用」，失败即阻断（不设 allow_failure）。
+
+workflow:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "web"
+    - if: $CI_PIPELINE_SOURCE == "api"
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $CI_PIPELINE_SOURCE == "push"
+
+stages:
+  - lint
+  - test
+
+default:
+  # 与 bms / mdm 共用同一台实例 runner（标签 bms / mdm）
+  tags: [bms]
+  image: python:3.14-slim
+  interruptible: true
+
+variables:
+  PIP_INDEX_URL: https://pypi.tuna.tsinghua.edu.cn/simple
+  UV_DEFAULT_INDEX: https://pypi.tuna.tsinghua.edu.cn/simple
+  UV_LINK_MODE: copy
+
+.setup: &setup
+  - pip install --no-cache-dir uv
+  - uv sync --frozen
+
+base-gate:
+  stage: lint
+  script:
+    - *setup
+    - uv run ruff check .
+    - uv run ruff format --check .
+    - uv run pyright
+    - uv run pytest --cov=src/engkit --cov-branch --cov-fail-under=100
+  coverage: '/^TOTAL.*?\s+(\d+(?:\.\d+)?%)$/'
+
+self-host-smoke:
+  stage: test
+  script:
+    - *setup
+    - uv run engkit preflight --fast --jobs off
+  needs: []

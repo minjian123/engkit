@@ -1,0 +1,19 @@
+# Python 缓存与本地产物（不入库）
+__pycache__/
+*.py[cod]
+.venv/
+.cache/
+.coverage
+.coverage.*
+coverage.json
+.pytest_cache/
+.pytest-tmp/
+pytest-of-*/
+tmp*/
+.covannot/
+.ruff_cache/
+dist/
+*.egg-info/
+
+# 工作区软链（各工作区本地建立，不入库）
+bms文档
