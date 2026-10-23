@@ -41,6 +41,7 @@ def test_check_broken_and_anchor(build_repo) -> None:
     assert report.broken == 1 and report.anchors == 1
 
 
+@pytest.mark.kiwi_id(2347)
 def test_check_percent_encoded_path(build_repo) -> None:
     """链接目标按 URL 编码解码后比较（目录名含空格写成 `%20` 不算断链）。"""
     root = build_repo(

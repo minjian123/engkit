@@ -35,6 +35,7 @@ FORBIDDEN = (
 PASS_CMD = f'"{sys.executable}" -c pass'
 
 
+@pytest.mark.kiwi_id(2347)
 def test_package_has_no_repo_literals() -> None:
     """包内无仓名字面（新增仓库接入只加配置，不改代码）。"""
     offenders: list[str] = []
