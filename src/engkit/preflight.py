@@ -7,7 +7,6 @@
 from __future__ import annotations
 
 import contextlib
-import importlib.util
 import os
 import re
 import shlex
