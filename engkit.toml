@@ -8,7 +8,7 @@ name = "engkit"
 root = "engkit文档"
 
 [docs.scope]
-whitelist_dirs = ["规范/", "概述/", "接入说明/"]
+whitelist_dirs = ["规范/", "概述/", "资料/"]
 
 [pytest]
 cmd = "uv run pytest"
