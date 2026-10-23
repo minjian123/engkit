@@ -173,12 +173,12 @@ def test_pytest_configure_ci(monkeypatch) -> None:
 def test_config_for_hook(monkeypatch, cfg, repo: Path) -> None:
     """配置定位：显式路径 / 自当前目录上溯 / 定位失败。"""
     monkeypatch.setenv(guard._CONFIG_ENV, str(cfg.path))
-    assert guard._config_for_hook() is not None
+    assert guard.config_for_hook() is not None
     monkeypatch.setenv(guard._CONFIG_ENV, str(repo / "missing.toml"))
-    assert guard._config_for_hook() is None
+    assert guard.config_for_hook() is None
     monkeypatch.delenv(guard._CONFIG_ENV)
     monkeypatch.chdir(repo / "docs")
-    found = guard._config_for_hook()
+    found = guard.config_for_hook()
     assert found is not None and found.name == "mini"
 
 

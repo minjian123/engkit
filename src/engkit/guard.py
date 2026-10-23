@@ -313,7 +313,7 @@ def pytest_addoption(parser: Any) -> None:
     addoption(FULL_FLAG, action="store_true", default=False, help="显式声明本次跑全量（本地非 CI 环境必需）")
 
 
-def _config_for_hook() -> Config | None:
+def config_for_hook() -> Config | None:
     """为钩子类入口定位配置（显式路径优先，其次自当前目录上溯）。
 
     Returns:
@@ -342,7 +342,7 @@ def pytest_configure(config: Any) -> None:
 
     params = getattr(config, "invocation_params", None)
     args: list[str] = list(params.args) if params is not None else []
-    loaded = _config_for_hook()
+    loaded = config_for_hook()
     guard_config = loaded.guard if loaded is not None else GuardConfig()
     kind = "" if is_ci() or is_wrapped() or allow_unwrapped() else classify(["pytest", *args], guard_config)
     if kind:
@@ -453,7 +453,7 @@ def check(argv: list[str] | None = None) -> None:
     global _checked
     if _checked or os.environ.get(HOOK_SKIP_ENV) == "1" or os.environ.get(HOOK_ENV) == "1":
         return
-    loaded = _config_for_hook()
+    loaded = config_for_hook()
     if loaded is None:
         return
     kind = should_block(list(sys.argv if argv is None else argv), loaded.guard)
