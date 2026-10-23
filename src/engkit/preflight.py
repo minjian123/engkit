@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import contextlib
+import importlib.util
 import os
 import re
 import shlex
@@ -126,6 +127,38 @@ def describe_jobs(value: str) -> str:
     """
     args = jobs_args(value)
     return f"并行 {' '.join(args)}" if args else "串行（--jobs off）"
+
+
+def xdist_available() -> bool:
+    """当前环境是否装了 pytest-xdist（`-n` 参数由它提供）。
+
+    说明：分发包名为 `pytest-xdist`，可导入模块名是 `xdist`（探测后者）。
+
+    Returns:
+        bool: 已安装返回 True。
+    """
+    return importlib.util.find_spec("xdist") is not None
+
+
+def parallel_args(value: str) -> tuple[str, ...]:
+    """并行参数；未装 pytest-xdist 时**显式降级**为串行（不静默、不整条预检失败）。
+
+    各仓测试框架插件不一定齐备（新仓尤甚），引擎不假定 `-n` 一定可用：缺装即打印降级原因并串行。
+
+    Args:
+        value: 并行档位取值（`auto` / 正整数 / `off`）。
+
+    Returns:
+        tuple[str, ...]: pytest 并行参数（空元组表示串行）。
+
+    Raises:
+        ValueError: 取值非法。
+    """
+    args = jobs_args(value)
+    if args and not xdist_available():
+        note("并行降级：未安装 pytest-xdist ⇒ 串行执行（装上 pytest-xdist 可恢复并行）")
+        return ()
+    return args
 
 
 def expand(cfg: Config, cmd: tuple[str, ...]) -> list[str]:
@@ -487,7 +520,7 @@ def run_selected(
         int: pytest 退出码 / 覆盖率或推导异常 1 / 超时 124。
     """
     try:
-        parallel = jobs_args(jobs)
+        parallel = parallel_args(jobs)
     except ValueError as error:
         print(f"[test-selection] {error}", file=sys.stderr)
         return 1

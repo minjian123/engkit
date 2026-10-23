@@ -45,6 +45,26 @@ def test_describe_jobs() -> None:
     assert preflight.describe_jobs("off") == "串行（--jobs off）"
 
 
+def test_parallel_args_with_xdist(monkeypatch) -> None:
+    """装了 pytest-xdist 时按档位给出并行参数。"""
+    monkeypatch.setattr(preflight, "xdist_available", lambda: True)
+    assert preflight.parallel_args("auto") == ("-n", "auto")
+    assert preflight.parallel_args("4") == ("-n", "4")
+    assert preflight.parallel_args("off") == ()
+
+
+def test_parallel_args_degrades_without_xdist(monkeypatch, capsys) -> None:
+    """未装 pytest-xdist 时显式降级为串行（打印原因，不静默失败）。"""
+    monkeypatch.setattr(preflight, "xdist_available", lambda: False)
+    assert preflight.parallel_args("auto") == ()
+    assert "并行降级" in capsys.readouterr().out
+
+
+def test_xdist_available_matches_environment() -> None:
+    """探测与当前解释器里 xdist 是否可用一致（engkit 自身依赖它）。"""
+    assert preflight.xdist_available() is True
+
+
 def test_expand(cfg) -> None:
     """占位符替换。"""
     cmd = preflight.expand(cfg, ("{python}", "-c", "print('{root}')", "{config}", "plain"))

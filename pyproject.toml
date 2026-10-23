@@ -5,7 +5,9 @@ description = "跨仓工程化工具包：文档链接与口径护栏、预检�
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
-dependencies = []
+# 唯一的三方运行期依赖：并行档位（`-n`）由 pytest-xdist 提供，随本包安装——各接入仓无需再自行声明
+# 该测试插件（口径见《工具包开发约定》§2）。缺失时并行档位显式降级为串行，不静默失败。
+dependencies = ["pytest-xdist>=3.6"]
 
 [project.scripts]
 engkit = "engkit.cli:main"
