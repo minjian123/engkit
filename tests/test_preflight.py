@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import subprocess
 import sys
 from pathlib import Path
@@ -45,24 +46,51 @@ def test_describe_jobs() -> None:
     assert preflight.describe_jobs("off") == "串行（--jobs off）"
 
 
-def test_parallel_args_with_xdist(monkeypatch) -> None:
+def test_parallel_args_with_xdist(monkeypatch, cfg) -> None:
     """装了 pytest-xdist 时按档位给出并行参数。"""
-    monkeypatch.setattr(preflight, "xdist_available", lambda: True)
-    assert preflight.parallel_args("auto") == ("-n", "auto")
-    assert preflight.parallel_args("4") == ("-n", "4")
-    assert preflight.parallel_args("off") == ()
+    monkeypatch.setattr(preflight, "xdist_available", lambda config: True)
+    assert preflight.parallel_args(cfg, "auto") == ("-n", "auto")
+    assert preflight.parallel_args(cfg, "4") == ("-n", "4")
+    assert preflight.parallel_args(cfg, "off") == ()
 
 
-def test_parallel_args_degrades_without_xdist(monkeypatch, capsys) -> None:
+def test_parallel_args_degrades_without_xdist(monkeypatch, capsys, cfg) -> None:
     """未装 pytest-xdist 时显式降级为串行（打印原因，不静默失败）。"""
-    monkeypatch.setattr(preflight, "xdist_available", lambda: False)
-    assert preflight.parallel_args("auto") == ()
+    monkeypatch.setattr(preflight, "xdist_available", lambda config: False)
+    assert preflight.parallel_args(cfg, "auto") == ()
     assert "并行降级" in capsys.readouterr().out
 
 
-def test_xdist_available_matches_environment() -> None:
-    """探测与当前解释器里 xdist 是否可用一致（engkit 自身依赖它）。"""
-    assert preflight.xdist_available() is True
+def test_xdist_probe_uses_configured_interpreter(cfg) -> None:
+    """探测走配置的解释器：可用即 True，解释器不存在即 False（不抛异常）。"""
+    assert preflight.xdist_available(cfg) is True
+    missing = dataclasses.replace(
+        cfg, coverage=dataclasses.replace(cfg.coverage, interpreter="definitely-missing-interpreter")
+    )
+    assert preflight.xdist_available(missing) is False
+
+
+def test_xdist_probe_timeout_degrades(monkeypatch, cfg) -> None:
+    """探测超时按「不可用」处理（不阻塞预检）。"""
+
+    def boom(*args, **kwargs):
+        raise subprocess.TimeoutExpired("x", 1)
+
+    monkeypatch.setattr(preflight.subprocess, "run", boom)
+    assert preflight.xdist_available(cfg) is False
+
+
+def test_run_selected_uses_config_base(monkeypatch, cfg) -> None:
+    """未显式给基准时按仓配置的 `[preflight].since` 取变更（不静默零变更）。"""
+    captured: dict[str, str] = {}
+
+    def fake_read(root, **kwargs):
+        captured.update(kwargs)
+        return []
+
+    monkeypatch.setattr(preflight.selection, "read_changed", fake_read)
+    assert preflight.run_selected(cfg) == 0
+    assert captured["changed_from"] == cfg.preflight.since
 
 
 def test_expand(cfg) -> None:

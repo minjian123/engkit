@@ -255,7 +255,8 @@ def _cmd_selection(args: argparse.Namespace) -> int:
     try:
         changed = selection.read_changed(
             cfg.root,
-            changed_from=args.changed_from,
+            # 未显式给基准时按仓配置的 `[preflight].since`（与预检 / 执行器同一口径）
+            changed_from=args.changed_from or cfg.preflight.since,
             changed_files=tuple(args.changed_file),
             changed_file_list=args.changed_file_list,
         )

@@ -129,23 +129,42 @@ def describe_jobs(value: str) -> str:
     return f"并行 {' '.join(args)}" if args else "串行（--jobs off）"
 
 
-def xdist_available() -> bool:
-    """当前环境是否装了 pytest-xdist（`-n` 参数由它提供）。
+def xdist_available(cfg: Config) -> bool:
+    """**pytest 那个解释器**里是否装了 pytest-xdist（`-n` 参数由它提供）。
 
-    说明：分发包名为 `pytest-xdist`，可导入模块名是 `xdist`（探测后者）。
+    说明：分发包名 `pytest-xdist`、可导入模块名 `xdist`；探测必须用真正跑 pytest 的解释器
+    （各仓的包装脚本可能由系统 Python 启动、pytest 却跑在 `uv run` 的 venv 里，用本进程判定会误报）。
+
+    Args:
+        cfg: 仓配置（解释器取 `[coverage].interpreter`，缺省用当前解释器）。
 
     Returns:
         bool: 已安装返回 True。
     """
-    return importlib.util.find_spec("xdist") is not None
+    # 配置值可能带 `uv run python` 这类前缀（按 shlex 拆分）；缺省直接用当前解释器（不能再走 shlex：
+    # Windows 路径里的反斜杠会被当转义符吃掉）
+    prefix = shlex.split(cfg.coverage.interpreter) if cfg.coverage.interpreter else [sys.executable]
+    try:
+        completed = subprocess.run(
+            [*prefix, "-c", "import xdist"],
+            cwd=cfg.root,
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return completed.returncode == 0
 
 
-def parallel_args(value: str) -> tuple[str, ...]:
+def parallel_args(cfg: Config, value: str) -> tuple[str, ...]:
     """并行参数；未装 pytest-xdist 时**显式降级**为串行（不静默、不整条预检失败）。
 
     各仓测试框架插件不一定齐备（新仓尤甚），引擎不假定 `-n` 一定可用：缺装即打印降级原因并串行。
 
     Args:
+        cfg: 仓配置。
         value: 并行档位取值（`auto` / 正整数 / `off`）。
 
     Returns:
@@ -155,8 +174,8 @@ def parallel_args(value: str) -> tuple[str, ...]:
         ValueError: 取值非法。
     """
     args = jobs_args(value)
-    if args and not xdist_available():
-        note("并行降级：未安装 pytest-xdist ⇒ 串行执行（装上 pytest-xdist 可恢复并行）")
+    if args and not xdist_available(cfg):
+        note("并行降级：pytest 解释器未安装 pytest-xdist ⇒ 串行执行（装上即可恢复并行）")
         return ()
     return args
 
@@ -520,7 +539,7 @@ def run_selected(
         int: pytest 退出码 / 覆盖率或推导异常 1 / 超时 124。
     """
     try:
-        parallel = parallel_args(jobs)
+        parallel = parallel_args(cfg, jobs)
     except ValueError as error:
         print(f"[test-selection] {error}", file=sys.stderr)
         return 1
@@ -529,7 +548,8 @@ def run_selected(
         try:
             changed = selection.read_changed(
                 cfg.root,
-                changed_from=changed_from,
+                # 未显式给基准时按仓配置的 `[preflight].since`（否则会「零变更 ⇒ 静默跳过」）
+                changed_from=changed_from or cfg.preflight.since,
                 changed_files=changed_files,
                 changed_file_list=changed_file_list,
             )
@@ -701,7 +721,7 @@ def run_full_tests(cfg: Config, budget: Budget, failures: list[str], *, jobs: st
         if cfg.coverage.plugin:
             argv.extend(["-p", cfg.coverage.plugin])
         out(f"\n[engkit] 覆盖率采集：{env[cfg.coverage.data_env]}（source={env[cfg.coverage.source_env]}）")
-    argv.extend(jobs_args(jobs))
+    argv.extend(parallel_args(cfg, jobs))
     execute("后端测试：聚合全量（--full）", argv, workdir, budget, failures, env=env)
     if no_cov:
         return
@@ -727,7 +747,7 @@ def run_project_tests(cfg: Config, budget: Budget, failures: list[str], *, jobs:
     """
     if cfg.backend is None:
         return
-    argv = [*shlex.split(cfg.pytest.cmd), "-q", *jobs_args(jobs)]
+    argv = [*shlex.split(cfg.pytest.cmd), "-q", *parallel_args(cfg, jobs)]
     for rel in cfg.backend.projects:
         execute(f"后端测试：工程级范围（{rel}）", argv, cfg.root / cfg.backend.root / rel, budget, failures)
 
