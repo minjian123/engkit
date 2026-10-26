@@ -119,6 +119,21 @@ def test_hooks_delegate(monkeypatch) -> None:
     assert calls == ["addoption:parser", "configure:config"]
 
 
+def test_ensure_basetemp_parent_creates_parent(tmp_path: Path) -> None:
+    """`--basetemp` 的父目录不存在时补齐（pytest 只 mkdir 末级、不递归建父目录）。"""
+    basetemp = tmp_path / "nested" / "pytest"
+    config = types.SimpleNamespace(option=types.SimpleNamespace(basetemp=str(basetemp)))
+    coverage_plugin.ensure_basetemp_parent(config)
+    assert basetemp.parent.is_dir()
+
+
+def test_ensure_basetemp_parent_skips_without_option(tmp_path: Path) -> None:
+    """取不到 basetemp（缺 option / 空值）时静默跳过，不建任何目录。"""
+    coverage_plugin.ensure_basetemp_parent("not-a-config")
+    coverage_plugin.ensure_basetemp_parent(types.SimpleNamespace(option=types.SimpleNamespace(basetemp="")))
+    assert not (tmp_path / "nested").exists()
+
+
 def test_sessionfinish_swallows_errors(monkeypatch) -> None:
     """落盘异常不阻断 pytest 收尾。"""
 

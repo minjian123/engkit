@@ -86,12 +86,37 @@ def pytest_addoption(parser: Any) -> None:
     guard.pytest_addoption(parser)
 
 
+def ensure_basetemp_parent(config: Any) -> None:
+    """补齐 `--basetemp` 的父目录（pytest 只 `mkdir` 末级、不递归建父目录）。
+
+    各仓 `addopts` 里的 `--basetemp=.cache/pytest` 指向仓内缓存目录，而
+    `TmpPathFactory.getbasetemp()` 实现为 `basetemp.mkdir(mode=0o700)`；父目录 `.cache`
+    不存在时，xdist 在 `pytest_sessionstart` 起 worker 即 `FileNotFoundError` 崩掉。
+    本函数在 `pytest_configure` 阶段调用（早于 `pytest_sessionstart`），保证父目录就位。
+
+    对 `config` 的形态做防御：pytest 正常传入 `Config` 对象，用例可用轻量假对象；
+    取不到 `basetemp` 时静默跳过（不影响既有流程）。
+
+    Args:
+        config: pytest 配置对象（或兼容的假对象）。
+    """
+    option = getattr(config, "option", None)
+    basetemp = getattr(option, "basetemp", "") or ""
+    if not basetemp:
+        return
+    # `abspath` 结果必然含父目录，无需再判空
+    os.makedirs(os.path.dirname(os.path.abspath(os.fspath(basetemp))), exist_ok=True)
+
+
 def pytest_configure(config: Any) -> None:
     """重命令 / 全量守卫：命中拦截条件即抛 `UsageError`，用例零执行。
+
+    同时补齐 `--basetemp` 的父目录（见 `ensure_basetemp_parent`）。
 
     Args:
         config: pytest 配置对象。
     """
+    ensure_basetemp_parent(config)
     guard.pytest_configure(config)
 
 
