@@ -56,7 +56,7 @@ reportUnknownArgumentType = false
 reportUnknownParameterType = false
 
 [tool.pytest.ini_options]
-addopts = "--import-mode=importlib"
+addopts = "--import-mode=importlib --basetemp=.cache/pytest"
 testpaths = ["tests"]
 pythonpath = ["src"]
 markers = [
@@ -66,6 +66,10 @@ markers = [
 [tool.coverage.run]
 branch = true
 source = ["engkit"]
+# 采集数据落点：仓内缓存目录（`.cache/` 已忽略），不落仓库根（2026-10-26 拍板）
+# 与 engkit.toml 的 `[coverage].data_file` 同口径：前者管裸跑 `pytest --cov`（pytest-cov 只读本文件），
+# 后者管经 engkit 包装的入口（`engkit coverage` / `run-selected`）。
+data_file = ".cache/coverage/.coverage"
 
 [tool.coverage.report]
 show_missing = true
