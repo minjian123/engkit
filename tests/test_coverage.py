@@ -65,6 +65,15 @@ def test_combine_without_data(tmp_path: Path) -> None:
     assert coverage.combine(tmp_path / ".coverage") == 0
 
 
+def test_ensure_data_dir_creates_parent(tmp_path: Path) -> None:
+    """落点可位于尚未创建的缓存目录（`.cache/coverage/`）：自动建父目录且可重复调用。"""
+    base = tmp_path / ".cache" / "coverage" / ".coverage"
+
+    assert coverage.ensure_data_dir(base) == tmp_path / ".cache" / "coverage"
+    assert base.parent.is_dir()
+    assert coverage.ensure_data_dir(base) == base.parent
+
+
 def test_module_matches_and_name() -> None:
     """模块匹配与路径归一。"""
     assert coverage.module_matches("a/src/pkg/core.py", ()) is True

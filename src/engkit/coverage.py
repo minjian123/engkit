@@ -66,6 +66,20 @@ def cleanup(data_file: Path) -> None:
             path.unlink()
 
 
+def ensure_data_dir(data_file: Path) -> Path:
+    """确保数据文件所在目录存在（落点可在尚未创建的缓存目录下，如 `.cache/coverage/`）。
+
+    Args:
+        data_file: 数据文件基址。
+
+    Returns:
+        Path: 数据文件的父目录。
+    """
+    parent = data_file.parent
+    parent.mkdir(parents=True, exist_ok=True)
+    return parent
+
+
 def _coverage_module() -> Any:
     """导入 coverage 库。
 
@@ -91,6 +105,7 @@ def combine(data_file: Path) -> int:
     Returns:
         int: 合并的采集文件数（0 表示没采集到数据）。
     """
+    ensure_data_dir(data_file)
     collected = data_files(data_file)
     if not collected:
         return 0

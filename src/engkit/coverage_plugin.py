@@ -18,10 +18,12 @@ from __future__ import annotations
 import atexit
 import contextlib
 import os
+from pathlib import Path
 from typing import Any
 
 from . import guard
 from .config import Config
+from .coverage import ensure_data_dir
 
 _coverage: Any = None
 """本进程的采集实例（未启用时为 None）。"""
@@ -61,6 +63,7 @@ def _new_coverage(cfg: Config, data_file: str) -> Any:
     except ModuleNotFoundError:  # pragma: no cover - 被测仓未装覆盖率工具时的退化路径
         return None
     source = tuple(item.strip() for item in os.environ.get(cfg.coverage.source_env, "").split(",") if item.strip())
+    ensure_data_dir(Path(data_file))
     # 后缀固定为进程号：xdist worker 各写一份，合并时按文件名唯一（`data_suffix=True` 的随机后缀会撞名）
     return coverage.Coverage(data_file=data_file, data_suffix=f"{os.getpid()}", branch=True, source=source or None)
 

@@ -17,7 +17,8 @@ cwd = "."
 [coverage]
 fail_under = 100
 plugin = ""
-data_file = ".coverage"
+# 采集数据落点：仓内缓存目录（`.cache/` 已忽略），不落仓库根（2026-10-25 拍板）
+data_file = ".cache/coverage/.coverage"
 
 [preflight]
 # 自举烟雾：只跑静态与工具链自检（用例与覆盖率由 base-gate 直跑，不在此重复）

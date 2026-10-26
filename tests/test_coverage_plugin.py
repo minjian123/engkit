@@ -64,17 +64,19 @@ def test_start_without_data_env(monkeypatch, repo: Path) -> None:
 
 
 def test_start_collects(monkeypatch, repo: Path, tmp_path: Path) -> None:
-    """注入采集变量后按进程号与采集范围启动（行 + 分支）。"""
+    """注入采集变量后按进程号与采集范围启动（行 + 分支）；落点目录不存在时自动创建。"""
     store: list[_FakeCoverage] = []
     monkeypatch.setitem(sys.modules, "coverage", _fake_module(store))
     monkeypatch.chdir(repo)
-    monkeypatch.setenv("ENGKIT_COVERAGE_DATA", str(tmp_path / ".coverage"))
+    data_file = tmp_path / ".cache" / "coverage" / ".coverage"
+    monkeypatch.setenv("ENGKIT_COVERAGE_DATA", str(data_file))
     monkeypatch.setenv("ENGKIT_COVERAGE_SOURCE", "pkg_a, svc")
     instance = coverage_plugin.start()
     assert instance is not None and instance.started == 1
     assert instance.kwargs["data_suffix"] == f"{os.getpid()}"
     assert instance.kwargs["branch"] is True
     assert instance.kwargs["source"] == ("pkg_a", "svc")
+    assert data_file.parent.is_dir()
 
 
 def test_start_without_source(monkeypatch, repo: Path, tmp_path: Path) -> None:
