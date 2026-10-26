@@ -431,3 +431,83 @@ def test_cli_base_dispatch(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -
     assert cli.main(["base", "base", "--self-test", *root]) == 0
     assert cli.main(["base", "backend-base", "--self-test", *root]) == 0
     capsys.readouterr()
+
+
+def _status_stage(tmp_path: Path) -> Path:
+    """搭最小阶段文档树（需求 / 任务 / 计划齐备且自洽）。
+
+    Args:
+        tmp_path: 临时仓根。
+
+    Returns:
+        Path: 阶段目录。
+    """
+    stage = tmp_path / "docs/项目/01_阶段"
+    (stage / "需求").mkdir(parents=True)
+    (stage / "计划").mkdir(parents=True)
+    (stage / "需求/00_需求_总览.md").write_text("| 编号 | 标题 |\n| --- | --- |\n| 01-1 | 甲 |\n", encoding="utf-8")
+    (stage / "需求/01_需求_域.md").write_text("## 1. 需求 01-1：甲\n", encoding="utf-8")
+    domain = stage / "任务/01_域"
+    domain.mkdir(parents=True)
+    (domain / "01_域.md").write_text(
+        "## 2. 子任务清单\n\n| 序号 | 任务 |\n| --- | --- |\n| 01 | 甲 |\n| 02 | 乙 |\n", encoding="utf-8"
+    )
+    task = domain / "01_任务"
+    (task / "实施").mkdir(parents=True)
+    (task / "01_任务.md").write_text(
+        "## 1. 任务信息\n\n| 项 | 值 |\n| --- | --- |\n| 编号 | 01 |\n| 对应需求 | 01-1 |\n", encoding="utf-8"
+    )
+    second = domain / "02_任务"
+    second.mkdir()
+    (second / "02_任务.md").write_text(
+        "## 1. 任务信息\n\n| 项 | 值 |\n| --- | --- |\n| 编号 | 02 |\n| 对应需求 | 01-1 |\n", encoding="utf-8"
+    )
+    (stage / "计划/01_计划_阶段.md").write_text(
+        "# 计划\n\n已完成 1 项，剩余 1 项\n\n"
+        "已完成 **8h**；剩余 **8h**，阶段合计 **16h**\n\n"
+        "## 2. 已完成任务\n\n"
+        "| 编号 | 任务 | 工时 | 完成日期 | 备注 | 记录 |\n| --- | --- | --- | --- | --- | --- |\n"
+        "| 01_01 | 甲 | 8h | 2026-10-20 | — | 有 |\n\n"
+        "## 3. 剩余任务排期\n\n"
+        "| 编号 | 任务 | 状态 | 工时 | 依赖 | 排期窗口 | 备注 | 归属 |\n"
+        "| --- | --- | --- | --- | --- | --- | --- | --- |\n"
+        "| 01_02 | 乙 | 未开始 | 8h | — | 2026-10-21 ~ 2026-10-22 | — | minjian |\n\n"
+        "```mermaid\ngantt\n01_02 乙\n```\n",
+        encoding="utf-8",
+    )
+    return stage
+
+
+def test_docs_status_rule_branches(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """文档一致性：齐备通过；各硬 / 软规则分别拦截。"""
+    stage = _status_stage(tmp_path)
+    cfg = _cfg(tmp_path)
+    assert docs_status.run(cfg, stage="", all_stages=False, strict=True) == 0
+    capsys.readouterr()
+
+    plan = stage / "计划/01_计划_阶段.md"
+    baseline = plan.read_text(encoding="utf-8")
+    plan.write_text(baseline.replace("| 01_02 | 乙 | 未开始 |", "| 01_02 | 乙 | 进行中 |"), encoding="utf-8")
+    assert docs_status.run(cfg, stage="", all_stages=False, strict=False) == 1
+    plan.write_text(baseline.replace("2026-10-21 ~ 2026-10-22", "下周"), encoding="utf-8")
+    assert docs_status.run(cfg, stage="", all_stages=False, strict=False) == 1
+    plan.write_text(baseline.replace("已完成 1 项，剩余 1 项", "已完成 2 项，剩余 2 项"), encoding="utf-8")
+    assert docs_status.run(cfg, stage="", all_stages=True, strict=True) == 1
+    plan.write_text(baseline.replace("01_02 乙\n", ""), encoding="utf-8")
+    assert docs_status.run(cfg, stage="", all_stages=False, strict=True) == 1
+    plan.write_text(baseline, encoding="utf-8")
+    (stage / "任务/01_域/01_域.md").write_text(
+        "## 2. 子任务清单\n\n| 序号 | 任务 |\n| --- | --- |\n| 01 | 甲 |\n| 02 | 乙 |\n| 03 | 丙 |\n",
+        encoding="utf-8",
+    )
+    assert docs_status.run(cfg, stage="", all_stages=False, strict=False) == 1
+    (stage / "任务/01_域/01_域.md").write_text(
+        "## 2. 子任务清单\n\n| 序号 | 任务 |\n| --- | --- |\n| 01 | 甲 |\n", encoding="utf-8"
+    )
+    assert docs_status.run(cfg, stage="", all_stages=False, strict=False) == 1
+    (stage / "任务/01_域/01_域.md").write_text(
+        "## 2. 子任务清单\n\n| 序号 | 任务 |\n| --- | --- |\n| 01 | 甲 |\n| 02 | 乙 |\n", encoding="utf-8"
+    )
+    (stage / "任务/01_域/01_任务/实施").rmdir()
+    assert docs_status.run(cfg, stage="", all_stages=False, strict=True) == 1
+    capsys.readouterr()
