@@ -6,10 +6,11 @@
 
 workflow:
   rules:
+    # 触发口径（2026-10-26 用户拍板，与 bms / mdm 同口径）：**推送不触发流水线**——日常验证以推送前的
+    # 本地预检（`engkit preflight`）为准，CI 只作按需的全量验证，**手工触发即全量**（GitLab 界面
+    # Run pipeline 或 `POST /projects/<id>/pipeline`）。因此推送**无需**再加 `-o ci.skip`。
     - if: $CI_PIPELINE_SOURCE == "web"
     - if: $CI_PIPELINE_SOURCE == "api"
-    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
-    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $CI_PIPELINE_SOURCE == "push"
 
 stages:
   - lint
