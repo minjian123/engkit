@@ -15,7 +15,7 @@ from . import coverage, docs_links, docs_scope, eol, gitutil, guard, kiwi, prefl
 from .config import CONFIG_NAME, Config, ConfigError, load_for
 from .console import configure_stdio, error, out
 
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 """包版本。"""
 
 
