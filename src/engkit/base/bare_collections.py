@@ -707,9 +707,10 @@ def self_test(rule: BareCollectionsRules) -> int:
         expect((demo, func_line, "Sequence", POSITION_SIGNATURE_PARAM) in found, "抽象落点 Sequence 报")
         expect((demo, func_line, "Mapping", POSITION_SIGNATURE_PARAM) in found, "抽象落点 Mapping 报")
         expect((demo, func_line, "AbstractSet", POSITION_SIGNATURE_PARAM) in found, "抽象落点 AbstractSet 报")
-        ascending_line = f"ascending: {sample.banned_ascending[0]}[int] = {sample.banned_ascending[0]}()"
+        ascending_form = sample.banned_ascending[0] if sample.banned_ascending else "SortedList"
+        ascending_line = f"ascending: {ascending_form}[int] = {ascending_form}()"
         expect(
-            (demo, ascending_line, sample.banned_ascending[0], POSITION_CLASS_FIELD) in found,
+            (demo, ascending_line, ascending_form, POSITION_CLASS_FIELD) in found,
             "升序形态报",
         )
         expect(all(hit.container != whitelist[0] for hit in hits), "白名单命中不报（插入序形态）")
