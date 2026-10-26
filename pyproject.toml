@@ -11,8 +11,11 @@ dependencies = ["pytest-xdist>=3.6"]
 
 [project.optional-dependencies]
 # 工具链版本基线（13_07）：各接入仓以 `engkit[devtools]` 的 git 源依赖取得 ruff / pyright，
-# 版本只在本处升级（升级 = 改这里 + 各仓改 rev）；下限口径 + 各仓锁文件固化，避免回退到诊断有差异的旧版
-devtools = ["ruff>=0.17.1", "pyright>=1.1.414"]
+# 版本只在本处升级（升级 = 改这里 + 各仓改 rev）。
+# 用 **`==` 严格同版**（而非 `>=` 下限）：下限会让各仓按各自解析时机落到不同补丁版（实测 bms / mdm
+# 落 0.17.2、engkit 仍 0.17.1），诊断与格式化口径就有分叉空间；`==` 让「三仓同版」成为结构性事实，
+# 代价是任何补丁升级都要改本处并发一次 rev（正是「升级只改一处」的目标形态）。
+devtools = ["ruff==0.17.2", "pyright==1.1.414"]
 
 [project.scripts]
 engkit = "engkit.cli:main"

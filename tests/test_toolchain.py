@@ -136,15 +136,17 @@ def test_ruff_violations_accept_compliant_config(tmp_path: Path) -> None:
 
 @pytest.mark.kiwi_id(KIWI_ID)
 def test_devtools_versions_declared() -> None:
-    """devtools 组声明 ruff 与 pyright 的版本下限，且仓内 dev 组不重复声明。"""
+    """devtools 组以 `==` 严格同版声明 ruff / pyright，且仓内 dev 组不重复声明。"""
     data = _read_toml(ROOT / "pyproject.toml")
     devtools = data["project"]["optional-dependencies"]["devtools"]
     for tool in TOOL_DEPS:
-        declared = [item for item in devtools if item.split(">")[0].split("=")[0].split("~")[0] == tool]
+        declared = [item for item in devtools if item.split("=")[0].strip() == tool]
         assert declared, f"devtools 未声明 {tool}"
-        assert any(spec in declared[0] for spec in (">=", "==", "~=")), f"{tool} 未声明版本下限：{declared[0]}"
+        # 下限（`>=`）会让各仓按各自解析时机落到不同补丁版（实测 0.17.1 / 0.17.2 并存），
+        # 故只接受严格同版；改版本走「改本处 + 各仓改 rev」的单一触点
+        assert "==" in declared[0], f"{tool} 须用 == 严格同版（下限会让各仓落到不同补丁版）：{declared[0]}"
     dev_group = data["dependency-groups"]["dev"]
-    offenders = [item for item in dev_group if item.split(">")[0].split("=")[0].strip() in TOOL_DEPS]
+    offenders = [item for item in dev_group if item.split("=")[0].split(">")[0].strip() in TOOL_DEPS]
     assert offenders == [], f"dev 组重复声明工具版本：{offenders}"
 
 
