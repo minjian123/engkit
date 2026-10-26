@@ -9,6 +9,11 @@ license = { text = "MIT" }
 # 该测试插件（口径见《工具包开发约定》§2）。缺失时并行档位显式降级为串行，不静默失败。
 dependencies = ["pytest-xdist>=3.6"]
 
+[project.optional-dependencies]
+# 工具链版本基线（13_07）：各接入仓以 `engkit[devtools]` 的 git 源依赖取得 ruff / pyright，
+# 版本只在本处升级（升级 = 改这里 + 各仓改 rev）；下限口径 + 各仓锁文件固化，避免回退到诊断有差异的旧版
+devtools = ["ruff>=0.17.1", "pyright>=1.1.414"]
+
 [project.scripts]
 engkit = "engkit.cli:main"
 
@@ -21,8 +26,8 @@ dev = [
     "pytest>=8.0",
     "pytest-cov>=5.0",
     "pytest-asyncio>=0.24",
-    "ruff>=0.6",
-    "pyright>=1.1.380",
+    # 工具版本走 devtools 组（本仓以自引用取得，版本仍在 optional-dependencies 一处声明）
+    "engkit[devtools]",
 ]
 
 [tool.hatch.build.targets.wheel]
@@ -33,13 +38,10 @@ url = "https://pypi.tuna.tsinghua.edu.cn/simple"
 default = true
 
 [tool.ruff]
-line-length = 120
+# 规则段（行宽 / 规则集 / 忽略项）的**唯一来源**是本仓 `toolchain/ruff-base.toml`（13_07）：
+# 各接入仓同样 extend 它，故本仓也不在此重复声明规则；本仓专属的只有 target-version（包声明 >=3.11）
+extend = "toolchain/ruff-base.toml"
 target-version = "py311"
-
-[tool.ruff.lint]
-select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF"]
-# 中文标点为文档与注释的有意用法，关闭歧义字符检查
-ignore = ["RUF001", "RUF002", "RUF003"]
 
 [tool.pyright]
 typeCheckingMode = "strict"

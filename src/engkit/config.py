@@ -307,6 +307,20 @@ class EolConfig:
 
 
 @dataclass(frozen=True)
+class ToolchainConfig:
+    """工具链基线登记（`[toolchain]`）。
+
+    Attributes:
+        baseline: ruff 规则基线路径（相对仓根；各接入仓以 `extend` 指向本文件）。
+        ruff_configs: 需校验「只 extend、不复制规则段」的仓配置路径（相对仓根；
+            指向平级仓的路径用 `../` 表示；路径不存在即跳过，供 CI 单仓克隆场景使用）。
+    """
+
+    baseline: str = "toolchain/ruff-base.toml"
+    ruff_configs: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class Config:
     """一份仓配置。
 
@@ -324,6 +338,7 @@ class Config:
         guard: 重命令拦截配置。
         kiwi: 用例登记配置。
         eol: 行尾护栏配置。
+        toolchain: 工具链基线登记。
         base_threshold: 基础模块绝对阈值。
         base_ratio: 基础模块占比阈值。
         backend_global: 后端全局变更规则。
@@ -344,6 +359,7 @@ class Config:
     guard: GuardConfig
     kiwi: KiwiConfig
     eol: EolConfig = field(default_factory=EolConfig)
+    toolchain: ToolchainConfig = field(default_factory=ToolchainConfig)
     base_threshold: int = 100
     base_ratio: float = 0.6
     backend_global: GlobalRule = field(default_factory=GlobalRule)
@@ -391,6 +407,7 @@ _TOP_KEYS = (
     "guard",
     "kiwi",
     "eol",
+    "toolchain",
 )
 
 _MISSING: Any = object()
@@ -865,6 +882,13 @@ def parse(raw: dict[str, Any], path: Path) -> Config:
         include_suffixes=_strings(eol_table, "include_suffixes", "eol"),
     )
 
+    toolchain_table = _table(raw, "toolchain", "toolchain")
+    _check_keys(toolchain_table, ("baseline", "ruff_configs"), "toolchain")
+    toolchain = ToolchainConfig(
+        baseline=_string(toolchain_table, "baseline", "toolchain", "toolchain/ruff-base.toml"),
+        ruff_configs=_strings(toolchain_table, "ruff_configs", "toolchain"),
+    )
+
     return Config(
         path=path,
         root=root,
@@ -879,6 +903,7 @@ def parse(raw: dict[str, Any], path: Path) -> Config:
         guard=guard,
         kiwi=kiwi,
         eol=eol,
+        toolchain=toolchain,
         base_threshold=int(_scalar(selection, "base_threshold", "selection", int, 100)),
         base_ratio=float(_scalar(selection, "base_ratio", "selection", float, 0.6)),
         backend_global=backend_global,

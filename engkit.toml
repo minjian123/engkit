@@ -39,3 +39,14 @@ env_file = "deploy/.env"
 host_env = "MJBK_IP"
 user_env = "MJBK_SSH_USER"
 container = "bms-kiwi"
+
+[toolchain]
+# ruff 规则基线（相对仓根）：各接入仓以 `extend` 指向本文件，规则段不再复制（13_07）
+baseline = "toolchain/ruff-base.toml"
+# 需校验「只 extend、不复制规则段」的仓配置（相对仓根；平级仓以 `../` 表示）。
+# 路径不存在即跳过——CI 只 clone 本仓时不误判；本地工作区各仓并置时逐个受检。
+ruff_configs = [
+  "pyproject.toml",
+  "../bms/backend/pyproject.toml",
+  "../mdm/backend/pyproject.toml",
+]

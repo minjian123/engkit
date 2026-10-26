@@ -138,25 +138,34 @@ dependencies = [
     { name = "pytest-xdist" },
 ]
 
-[package.dev-dependencies]
-dev = [
+[package.optional-dependencies]
+devtools = [
     { name = "pyright" },
-    { name = "pytest" },
-    { name = "pytest-asyncio" },
-    { name = "pytest-cov" },
     { name = "ruff" },
 ]
 
+[package.dev-dependencies]
+dev = [
+    { name = "engkit", extra = ["devtools"] },
+    { name = "pytest" },
+    { name = "pytest-asyncio" },
+    { name = "pytest-cov" },
+]
+
 [package.metadata]
-requires-dist = [{ name = "pytest-xdist", specifier = ">=3.6" }]
+requires-dist = [
+    { name = "pyright", marker = "extra == 'devtools'", specifier = ">=1.1.414" },
+    { name = "pytest-xdist", specifier = ">=3.6" },
+    { name = "ruff", marker = "extra == 'devtools'", specifier = ">=0.17.1" },
+]
+provides-extras = ["devtools"]
 
 [package.metadata.requires-dev]
 dev = [
-    { name = "pyright", specifier = ">=1.1.380" },
+    { name = "engkit", extras = ["devtools"] },
     { name = "pytest", specifier = ">=8.0" },
     { name = "pytest-asyncio", specifier = ">=0.24" },
     { name = "pytest-cov", specifier = ">=5.0" },
-    { name = "ruff", specifier = ">=0.6" },
 ]
 
 [[package]]
