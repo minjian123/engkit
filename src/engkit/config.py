@@ -321,6 +321,370 @@ class ToolchainConfig:
 
 
 @dataclass(frozen=True)
+class DesignRegistryRules:
+    """数据库设计登记规则（`[rules.base.design]`）。
+
+    Attributes:
+        dir: 数据库设计目录（相对仓根）。
+        overview: 总览文件（相对仓根）。
+        table_subdir: 数据表文件子目录名。
+        dialect_subdir: 方言特性子目录名。
+        status_values: 表状态合法取值。
+    """
+
+    dir: str
+    overview: str
+    table_subdir: str
+    dialect_subdir: str
+    status_values: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class NamingRules:
+    """登记面命名形态规则（`[rules.base.naming]`）。
+
+    Attributes:
+        tool_root: 工具链根（目录名与脚本名纳入登记面）。
+        package_roots: 前端包根清单。
+        versions_root: 表结构变更清单根（可空）。
+    """
+
+    tool_root: str = ""
+    package_roots: tuple[str, ...] = ()
+    versions_root: str = ""
+
+
+@dataclass(frozen=True)
+class RuntimeIdentifierRule:
+    """运行期登记值来源（`[[rules.base.runtime]]`）。
+
+    Attributes:
+        path: 来源文件（相对仓根）。
+        extract: 提取方式（`widget_literal` / `ts_widgets` / `code_pattern` / `icon_pattern`）。
+        expect_count: 期望提取条数下限。
+    """
+
+    path: str
+    extract: str
+    expect_count: int = 1
+
+
+@dataclass(frozen=True)
+class BaseRules:
+    """基座完整性校验规则（`[rules.base]`）。
+
+    Attributes:
+        manifest: 基座文档清单（相对仓根）。
+        base_dirs: 基座扫描目录清单。
+        cross_layer: 禁止被基座文件相对链接的前缀。
+        local_only: 清单登记但不参与校验的前缀。
+        bad_wording: 项目专属措辞残留词表。
+        runtime: 运行期登记值来源。
+        design: 数据库设计登记规则（可空）。
+        naming: 登记面命名形态规则（可空）。
+        link_suffixes: 参与跨层检查的链接后缀。
+        section_ref_root: 跨文档编号引用扫描根（空串取文档根）。
+    """
+
+    manifest: str
+    base_dirs: tuple[str, ...]
+    cross_layer: tuple[str, ...]
+    local_only: tuple[str, ...] = ()
+    bad_wording: tuple[str, ...] = ()
+    runtime: tuple[RuntimeIdentifierRule, ...] = ()
+    design: DesignRegistryRules | None = None
+    naming: NamingRules | None = None
+    link_suffixes: tuple[str, ...] = (".md", ".html")
+    section_ref_root: str = ""
+
+
+@dataclass(frozen=True)
+class BackendBaseRules:
+    """后端基类体系校验规则（`[rules.backend_base]`）。
+
+    Attributes:
+        manifest: 基类清单（相对仓根）。
+        chain_doc: 继承链与体系根清单文档（相对仓根）。
+        source_dirs: 后端源码扫描面。
+        error_codes: 错误码清单模块。
+        versions_dir: 迁移清单根。
+        direct_baseline: 直继承存量基线 JSON。
+        root_bases_marker: 体系根清单小节标记。
+        value_object_root: 值对象体系根类名。
+        framework_object_root: 框架对象体系根类名。
+        datasources: 合法数据源段。
+        default_chain: 缺省链名。
+        domain_layout: 域布局 JSON（迁移清单域目录据此校验）。
+    """
+
+    manifest: str
+    chain_doc: str
+    source_dirs: tuple[str, ...]
+    error_codes: str
+    versions_dir: str
+    direct_baseline: str
+    root_bases_marker: str
+    value_object_root: str
+    framework_object_root: str
+    datasources: tuple[str, ...]
+    default_chain: str
+    domain_layout: str = ""
+
+
+@dataclass(frozen=True)
+class DocsStatusRules:
+    """需求 / 任务 / 计划一致性规则（`[rules.docs_status]`）。
+
+    Attributes:
+        project_dir: 阶段根目录（相对仓根）。
+        stage: 缺省核对的阶段目录名。
+        statuses: 状态合法取值。
+        todo_statuses: 剩余任务表允许的状态。
+        done_status: 已完成状态取值（完成日期口径据此判定）。
+        req_id_pattern: 需求编号形态。
+        task_id_pattern: 嵌套子任务编号形态。
+        plan_id_pattern: 计划编号形态。
+        overview_glob: 需求总览文件形态。
+        plan_glob: 计划文件形态。
+        aid_dirs: 任务目录内的附属目录（不计为任务）。
+        plan_done_columns: 已完成任务表列数。
+        plan_todo_columns: 剩余任务表列数。
+        record_dirs: 已完成任务的留痕目录要求。
+    """
+
+    project_dir: str
+    stage: str
+    statuses: tuple[str, ...]
+    todo_statuses: tuple[str, ...]
+    req_id_pattern: str
+    task_id_pattern: str
+    plan_id_pattern: str
+    overview_glob: str = "00_需求_*.md"
+    plan_glob: str = "01_计划_*.md"
+    aid_dirs: tuple[str, ...] = ("设计", "测试", "实施")
+    plan_done_columns: int = 6
+    plan_todo_columns: int = 8
+    record_dirs: tuple[str, ...] = ("实施",)
+    done_status: str = "已完成"
+
+
+@dataclass(frozen=True)
+class RegistrySpec:
+    """一份 AST 登记清单的定位（模块 / 常量 / 枚举 / 字段名）。
+
+    Attributes:
+        path: 模块文件（相对仓根）。
+        const: 清单常量名。
+        enum: `kind` 取值枚举名（可空）。
+        key_field: 标识字段名。
+        table_field: 表名字段名（可空）。
+        kind_field: kind 字段名。
+    """
+
+    path: str
+    const: str
+    enum: str = ""
+    key_field: str = ""
+    table_field: str = ""
+    kind_field: str = "kind"
+
+
+@dataclass(frozen=True)
+class SystemFieldsRules:
+    """系统字段（`form_key`）校验规则（`[rules.system_fields]`）。
+
+    Attributes:
+        catalog: 表单清单定位。
+        datasource: 数据源清单定位。
+        table_dir: 数据表文件目录（相对仓根）。
+        row_form_key: 表文件必须出现的 `form_key` 行名。
+        row_parent_id: 表文件必须出现的父级行名。
+    """
+
+    catalog: RegistrySpec
+    datasource: RegistrySpec
+    table_dir: str
+    row_form_key: str = "form_key"
+    row_parent_id: str = "parent_id"
+
+
+@dataclass(frozen=True)
+class EnvTemplateRule:
+    """一份环境变量模板（`[[rules.env_example.templates]]`）。
+
+    Attributes:
+        path: 模板路径（相对仓根）。
+        required_keys: 必须齐备的键位。
+        removed_keys: 不得残留的废弃键（与段级清单取并集）。
+    """
+
+    path: str
+    required_keys: tuple[str, ...] = ()
+    removed_keys: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class EnvExampleRules:
+    """环境变量模板键位规则（`[rules.env_example]`）。
+
+    Attributes:
+        templates: 模板清单。
+        removed_keys: 段级废弃键（对全部模板生效）。
+        private_key_marker: 疑似真实私钥标记。
+        placeholder_marker: 占位符标记（含标记即视为占位）。
+    """
+
+    templates: tuple[EnvTemplateRule, ...]
+    removed_keys: tuple[str, ...] = ()
+    private_key_marker: str = "PRIVATE KEY"
+    placeholder_marker: str = "..."
+
+
+@dataclass(frozen=True)
+class PrototypeRules:
+    """界面「实现 ↔ 原型」对照规则（`[rules.prototype]`）。
+
+    Attributes:
+        record_pattern: 测试记录路径正则（相对仓根）。
+        context_pattern: 原型依据候选文本路径正则。
+        prototype_ref_pattern: 原型依据引用正则。
+        ui_patterns: 界面源码路径正则。
+        section_heading: 原型对照节标题正则。
+        table_header_keyword: 对照表表头须含的关键词。
+        screenshot_pattern: 截图引用正则。
+        unfinished_words: 未完成词表。
+        not_applicable_word: 「不适用」判定词。
+        min_reason_len: 「不适用」理由最小长度。
+        base: 变更比较基准。
+        context_dirs: 任务目录下收文本的子目录。
+    """
+
+    record_pattern: str
+    context_pattern: str
+    prototype_ref_pattern: str
+    ui_patterns: tuple[str, ...]
+    section_heading: str
+    table_header_keyword: str
+    screenshot_pattern: str
+    unfinished_words: tuple[str, ...]
+    not_applicable_word: str
+    min_reason_len: int = 10
+    base: str = "origin/main"
+    context_dirs: tuple[str, ...] = ("设计", "实施", "测试")
+
+
+@dataclass(frozen=True)
+class ServiceBoundariesRules:
+    """服务边界与跨库访问规则（`[rules.service_boundaries]`）。
+
+    Attributes:
+        shared_groups: 共享库分组目录（相对后端根）。
+        service_groups: 服务分组目录（相对后端根）。
+        shared_libs: 共享库包名清单。
+        service_packages: 服务包全集。
+        runtime_packages: 任意服务镜像恒含的包。
+        layers_shared: 共享库分层反向依赖（源子包 → 禁止目标）。
+        layers_service: 服务内分层反向依赖。
+        ownership_module: 表归属登记模块（AST 解析）。
+        ownership_const: 表归属清单常量名。
+        owner_every_service: 每服务自有哨兵。
+        infrastructure_tables: 基础设施表清单。
+        exempt_modules: 表名引用扫描豁免模块（相对仓根后缀匹配）。
+        catalog_module: 服务目录模块。
+        catalog_const: 服务目录常量名。
+        layout: 域布局 JSON。
+        exceptions: 读侧例外 JSON。
+        baseline: 域级基线 JSON。
+        shared_models_marker: 共享模型子包标记。
+        ops_dir: 运维脚本目录（相对仓根）。
+        ops_dockerfile: 镜像构建文件（相对仓根）。
+        run_image_values: `RUN_IMAGE` 合法取值。
+        image_packages: 镜像 → 所含包集合。
+        counters: 分类计数键清单。
+    """
+
+    shared_groups: tuple[str, ...]
+    service_groups: tuple[str, ...]
+    shared_libs: tuple[str, ...]
+    service_packages: tuple[str, ...]
+    runtime_packages: tuple[str, ...]
+    layers_shared: dict[str, tuple[str, ...]]
+    layers_service: dict[str, tuple[str, ...]]
+    ownership_module: str
+    ownership_const: str
+    owner_every_service: str
+    infrastructure_tables: tuple[str, ...]
+    exempt_modules: tuple[str, ...]
+    catalog_module: str
+    catalog_const: str
+    layout: str
+    exceptions: str
+    baseline: str
+    shared_models_marker: str
+    ops_dir: str
+    ops_dockerfile: str
+    run_image_values: tuple[str, ...]
+    image_packages: dict[str, tuple[str, ...]]
+    counters: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class BareCollectionsRules:
+    """集合声明白名单规则（`[rules.bare_collections]`）。
+
+    Attributes:
+        scan_targets: 扫描根清单（相对仓根）。
+        whitelist: 集合声明白名单（命中即放行）。
+        banned_bare: 裸容器形态。
+        banned_readonly: 只读 / 可变抽象落点。
+        banned_ascending: 升序形态。
+        unregistered: 未登记形态集。
+        tuple_forms: 元组形态。
+        protocol_forms: 迭代与调用协议（不查）。
+        implementation_files: 集合体系实现文件（不属约束对象）。
+        allow_marker: 行级豁免标记。
+        baseline: 基线快照路径。
+        baseline_version: 基线格式版本。
+        reasons: 违规原因提示（按命中形态）。
+        exclude_parts: 剪枝目录名。
+    """
+
+    scan_targets: tuple[str, ...]
+    whitelist: tuple[str, ...]
+    banned_bare: tuple[str, ...]
+    banned_readonly: tuple[str, ...]
+    banned_ascending: tuple[str, ...]
+    unregistered: tuple[str, ...]
+    tuple_forms: tuple[str, ...]
+    protocol_forms: tuple[str, ...]
+    implementation_files: tuple[str, ...]
+    allow_marker: str
+    baseline: str
+    baseline_version: int = 1
+    reasons: dict[str, str] = field(default_factory=dict)
+    exclude_parts: tuple[str, ...] = ("__pycache__", ".venv", "node_modules", ".git")
+
+
+@dataclass(frozen=True)
+class MetricsRules:
+    """边界度量采集规则（`[rules.metrics]`）。
+
+    Attributes:
+        violation_keys: 越界计数键清单（总越界数 = 各键求和）。
+        cross_access_key: 跨库访问计数键。
+        registered_exceptions_key: 例外登记条数键。
+        metric_name: 运行期指标名。
+        checker: 静态校验来源子命令（固定值，键位保留）。
+    """
+
+    violation_keys: tuple[str, ...]
+    cross_access_key: str
+    registered_exceptions_key: str
+    metric_name: str
+    checker: str = "service-boundaries"
+
+
+@dataclass(frozen=True)
 class Config:
     """一份仓配置。
 
@@ -339,6 +703,15 @@ class Config:
         kiwi: 用例登记配置。
         eol: 行尾护栏配置。
         toolchain: 工具链基线登记。
+        base_rules: 基座完整性规则（未登记为 None）。
+        backend_base_rules: 后端基类体系规则（未登记为 None）。
+        boundaries_rules: 服务边界规则（未登记为 None）。
+        collections_rules: 集合声明规则（未登记为 None）。
+        system_fields_rules: 系统字段规则（未登记为 None）。
+        prototype_rules: 原型对照规则（未登记为 None）。
+        env_example_rules: 环境模板规则（未登记为 None）。
+        docs_status_rules: 文档一致性规则（未登记为 None）。
+        metrics_rules: 边界度量规则（未登记为 None）。
         base_threshold: 基础模块绝对阈值。
         base_ratio: 基础模块占比阈值。
         backend_global: 后端全局变更规则。
@@ -360,6 +733,15 @@ class Config:
     kiwi: KiwiConfig
     eol: EolConfig = field(default_factory=EolConfig)
     toolchain: ToolchainConfig = field(default_factory=ToolchainConfig)
+    base_rules: BaseRules | None = None
+    backend_base_rules: BackendBaseRules | None = None
+    boundaries_rules: ServiceBoundariesRules | None = None
+    collections_rules: BareCollectionsRules | None = None
+    system_fields_rules: SystemFieldsRules | None = None
+    prototype_rules: PrototypeRules | None = None
+    env_example_rules: EnvExampleRules | None = None
+    docs_status_rules: DocsStatusRules | None = None
+    metrics_rules: MetricsRules | None = None
     base_threshold: int = 100
     base_ratio: float = 0.6
     backend_global: GlobalRule = field(default_factory=GlobalRule)
@@ -737,6 +1119,515 @@ def _parse_self_tests(table: dict[str, Any], where: str) -> tuple[SelfTest, ...]
     return tuple(entries)
 
 
+def _str_map(source: dict[str, Any], key: str, where: str) -> dict[str, str]:
+    """取字符串映射（`[段.<键>]` 下的标量表）。
+
+    Args:
+        source: 表。
+        key: 键名。
+        where: 位置描述。
+
+    Returns:
+        dict[str, str]: 映射。
+
+    Raises:
+        ConfigError: 类型不符或取值不是字符串。
+    """
+    table = _table(source, key, f"{where}.{key}")
+    result: dict[str, str] = {}
+    for name, value in table.items():
+        if not isinstance(value, str):
+            raise _fail(f"{where}.{key}", f"`{name}` 应为字符串")
+        result[name] = value
+    return result
+
+
+def _list_map(source: dict[str, Any], key: str, where: str) -> dict[str, tuple[str, ...]]:
+    """取「字符串数组」映射（`[段.<键>]` 下每键一个数组）。
+
+    Args:
+        source: 表。
+        key: 键名。
+        where: 位置描述。
+
+    Returns:
+        dict[str, tuple[str, ...]]: 映射。
+
+    Raises:
+        ConfigError: 类型不符或元素不是字符串。
+    """
+    table = _table(source, key, f"{where}.{key}")
+    result: dict[str, tuple[str, ...]] = {}
+    for name, value in table.items():
+        if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+            raise _fail(f"{where}.{key}", f"`{name}` 应为字符串数组")
+        result[name] = tuple(value)
+    return result
+
+
+def _parse_design(table: dict[str, Any], where: str) -> DesignRegistryRules:
+    """解析数据库设计登记规则。
+
+    Args:
+        table: 子表。
+        where: 位置描述。
+
+    Returns:
+        DesignRegistryRules: 规则。
+    """
+    _check_keys(table, ("dir", "overview", "table_subdir", "dialect_subdir", "status_values"), where)
+    return DesignRegistryRules(
+        dir=_string(table, "dir", where),
+        overview=_string(table, "overview", where),
+        table_subdir=_string(table, "table_subdir", where, "数据表设计"),
+        dialect_subdir=_string(table, "dialect_subdir", where, "方言特性"),
+        status_values=_strings(table, "status_values", where),
+    )
+
+
+def _parse_naming(table: dict[str, Any], where: str) -> NamingRules:
+    """解析登记面命名形态规则。
+
+    Args:
+        table: 子表。
+        where: 位置描述。
+
+    Returns:
+        NamingRules: 规则。
+    """
+    _check_keys(table, ("tool_root", "package_roots", "versions_root"), where)
+    return NamingRules(
+        tool_root=_string(table, "tool_root", where, ""),
+        package_roots=_strings(table, "package_roots", where),
+        versions_root=_string(table, "versions_root", where, ""),
+    )
+
+
+def _parse_runtime(table: dict[str, Any], where: str) -> tuple[RuntimeIdentifierRule, ...]:
+    """解析运行期登记值来源清单。
+
+    Args:
+        table: 子表。
+        where: 位置描述。
+
+    Returns:
+        tuple[RuntimeIdentifierRule, ...]: 规则清单。
+
+    Raises:
+        ConfigError: 提取方式非法。
+    """
+    rules: list[RuntimeIdentifierRule] = []
+    for index, item in enumerate(_tables(table, "runtime", where)):
+        item_where = f"{where}.runtime[{index}]"
+        _check_keys(item, ("path", "extract", "expect_count"), item_where)
+        extract = _string(item, "extract", item_where)
+        if extract not in ("widget_literal", "ts_widgets", "code_pattern", "icon_pattern"):
+            raise _fail(item_where, f"`extract` 非法：{extract}")
+        rules.append(
+            RuntimeIdentifierRule(
+                path=_string(item, "path", item_where),
+                extract=extract,
+                expect_count=int(_scalar(item, "expect_count", item_where, int, 1)),
+            )
+        )
+    return tuple(rules)
+
+
+def _parse_base_rules(table: dict[str, Any], where: str) -> BaseRules:
+    """解析 `[rules.base]`。
+
+    Args:
+        table: 子表。
+        where: 位置描述。
+
+    Returns:
+        BaseRules: 规则。
+    """
+    _check_keys(
+        table,
+        (
+            "manifest",
+            "base_dirs",
+            "cross_layer",
+            "local_only",
+            "bad_wording",
+            "runtime",
+            "design",
+            "naming",
+            "link_suffixes",
+            "section_ref_root",
+        ),
+        where,
+    )
+    design_table = _table(table, "design", f"{where}.design")
+    naming_table = _table(table, "naming", f"{where}.naming")
+    return BaseRules(
+        manifest=_string(table, "manifest", where),
+        base_dirs=_strings(table, "base_dirs", where),
+        cross_layer=_strings(table, "cross_layer", where),
+        local_only=_strings(table, "local_only", where),
+        bad_wording=_strings(table, "bad_wording", where),
+        runtime=_parse_runtime(table, where),
+        design=_parse_design(design_table, f"{where}.design") if design_table else None,
+        naming=_parse_naming(naming_table, f"{where}.naming") if naming_table else None,
+        link_suffixes=_strings(table, "link_suffixes", where, (".md", ".html")),
+        section_ref_root=_string(table, "section_ref_root", where, ""),
+    )
+
+
+def _parse_backend_base_rules(table: dict[str, Any], where: str) -> BackendBaseRules:
+    """解析 `[rules.backend_base]`。
+
+    Args:
+        table: 子表。
+        where: 位置描述。
+
+    Returns:
+        BackendBaseRules: 规则。
+    """
+    _check_keys(
+        table,
+        (
+            "manifest",
+            "chain_doc",
+            "source_dirs",
+            "error_codes",
+            "versions_dir",
+            "direct_baseline",
+            "root_bases_marker",
+            "value_object_root",
+            "framework_object_root",
+            "datasources",
+            "default_chain",
+            "domain_layout",
+        ),
+        where,
+    )
+    return BackendBaseRules(
+        manifest=_string(table, "manifest", where),
+        chain_doc=_string(table, "chain_doc", where),
+        source_dirs=_strings(table, "source_dirs", where),
+        error_codes=_string(table, "error_codes", where),
+        versions_dir=_string(table, "versions_dir", where),
+        direct_baseline=_string(table, "direct_baseline", where),
+        root_bases_marker=_string(table, "root_bases_marker", where),
+        value_object_root=_string(table, "value_object_root", where),
+        framework_object_root=_string(table, "framework_object_root", where),
+        datasources=_strings(table, "datasources", where),
+        default_chain=_string(table, "default_chain", where),
+        domain_layout=_string(table, "domain_layout", where, ""),
+    )
+
+
+def _parse_docs_status_rules(table: dict[str, Any], where: str) -> DocsStatusRules:
+    """解析 `[rules.docs_status]`。
+
+    Args:
+        table: 子表。
+        where: 位置描述。
+
+    Returns:
+        DocsStatusRules: 规则。
+    """
+    _check_keys(
+        table,
+        (
+            "project_dir",
+            "stage",
+            "statuses",
+            "todo_statuses",
+            "req_id_pattern",
+            "task_id_pattern",
+            "plan_id_pattern",
+            "overview_glob",
+            "plan_glob",
+            "aid_dirs",
+            "plan_done_columns",
+            "plan_todo_columns",
+            "record_dirs",
+            "done_status",
+        ),
+        where,
+    )
+    return DocsStatusRules(
+        project_dir=_string(table, "project_dir", where),
+        stage=_string(table, "stage", where),
+        statuses=_strings(table, "statuses", where),
+        todo_statuses=_strings(table, "todo_statuses", where),
+        req_id_pattern=_string(table, "req_id_pattern", where),
+        task_id_pattern=_string(table, "task_id_pattern", where),
+        plan_id_pattern=_string(table, "plan_id_pattern", where),
+        overview_glob=_string(table, "overview_glob", where, "00_需求_*.md"),
+        plan_glob=_string(table, "plan_glob", where, "01_计划_*.md"),
+        aid_dirs=_strings(table, "aid_dirs", where, ("设计", "测试", "实施")),
+        plan_done_columns=int(_scalar(table, "plan_done_columns", where, int, 6)),
+        plan_todo_columns=int(_scalar(table, "plan_todo_columns", where, int, 8)),
+        record_dirs=_strings(table, "record_dirs", where, ("实施",)),
+        done_status=_string(table, "done_status", where, "已完成"),
+    )
+
+
+def _parse_registry_spec(table: dict[str, Any], where: str) -> RegistrySpec:
+    """解析一份 AST 登记清单定位。
+
+    Args:
+        table: 子表。
+        where: 位置描述。
+
+    Returns:
+        RegistrySpec: 定位。
+    """
+    _check_keys(table, ("path", "const", "enum", "key_field", "table_field", "kind_field"), where)
+    return RegistrySpec(
+        path=_string(table, "path", where),
+        const=_string(table, "const", where),
+        enum=_string(table, "enum", where, ""),
+        key_field=_string(table, "key_field", where),
+        table_field=_string(table, "table_field", where, ""),
+        kind_field=_string(table, "kind_field", where, "kind"),
+    )
+
+
+def _parse_system_fields_rules(table: dict[str, Any], where: str) -> SystemFieldsRules:
+    """解析 `[rules.system_fields]`。
+
+    Args:
+        table: 子表。
+        where: 位置描述。
+
+    Returns:
+        SystemFieldsRules: 规则。
+    """
+    _check_keys(table, ("catalog", "datasource", "table_dir", "row_form_key", "row_parent_id"), where)
+    return SystemFieldsRules(
+        catalog=_parse_registry_spec(_table(table, "catalog", f"{where}.catalog"), f"{where}.catalog"),
+        datasource=_parse_registry_spec(_table(table, "datasource", f"{where}.datasource"), f"{where}.datasource"),
+        table_dir=_string(table, "table_dir", where),
+        row_form_key=_string(table, "row_form_key", where, "form_key"),
+        row_parent_id=_string(table, "row_parent_id", where, "parent_id"),
+    )
+
+
+def _parse_env_example_rules(table: dict[str, Any], where: str) -> EnvExampleRules:
+    """解析 `[rules.env_example]`。
+
+    Args:
+        table: 子表。
+        where: 位置描述。
+
+    Returns:
+        EnvExampleRules: 规则。
+
+    Raises:
+        ConfigError: 未登记任何模板。
+    """
+    _check_keys(table, ("templates", "removed_keys", "private_key_marker", "placeholder_marker"), where)
+    templates: list[EnvTemplateRule] = []
+    for index, item in enumerate(_tables(table, "templates", where)):
+        item_where = f"{where}.templates[{index}]"
+        _check_keys(item, ("path", "required_keys", "removed_keys"), item_where)
+        templates.append(
+            EnvTemplateRule(
+                path=_string(item, "path", item_where),
+                required_keys=_strings(item, "required_keys", item_where),
+                removed_keys=_strings(item, "removed_keys", item_where),
+            )
+        )
+    if not templates:
+        raise _fail(where, "需给出 `templates`（至少一份模板）")
+    return EnvExampleRules(
+        templates=tuple(templates),
+        removed_keys=_strings(table, "removed_keys", where),
+        private_key_marker=_string(table, "private_key_marker", where, "PRIVATE KEY"),
+        placeholder_marker=_string(table, "placeholder_marker", where, "..."),
+    )
+
+
+def _parse_prototype_rules(table: dict[str, Any], where: str) -> PrototypeRules:
+    """解析 `[rules.prototype]`。
+
+    Args:
+        table: 子表。
+        where: 位置描述。
+
+    Returns:
+        PrototypeRules: 规则。
+    """
+    _check_keys(
+        table,
+        (
+            "record_pattern",
+            "context_pattern",
+            "prototype_ref_pattern",
+            "ui_patterns",
+            "section_heading",
+            "table_header_keyword",
+            "screenshot_pattern",
+            "unfinished_words",
+            "not_applicable_word",
+            "min_reason_len",
+            "base",
+            "context_dirs",
+        ),
+        where,
+    )
+    return PrototypeRules(
+        record_pattern=_string(table, "record_pattern", where),
+        context_pattern=_string(table, "context_pattern", where),
+        prototype_ref_pattern=_string(table, "prototype_ref_pattern", where),
+        ui_patterns=_strings(table, "ui_patterns", where),
+        section_heading=_string(table, "section_heading", where),
+        table_header_keyword=_string(table, "table_header_keyword", where, "结论"),
+        screenshot_pattern=_string(table, "screenshot_pattern", where),
+        unfinished_words=_strings(table, "unfinished_words", where),
+        not_applicable_word=_string(table, "not_applicable_word", where, "不适用"),
+        min_reason_len=int(_scalar(table, "min_reason_len", where, int, 10)),
+        base=_string(table, "base", where, "origin/main"),
+        context_dirs=_strings(table, "context_dirs", where, ("设计", "实施", "测试")),
+    )
+
+
+def _parse_boundaries_rules(table: dict[str, Any], where: str) -> ServiceBoundariesRules:
+    """解析 `[rules.service_boundaries]`。
+
+    Args:
+        table: 子表。
+        where: 位置描述。
+
+    Returns:
+        ServiceBoundariesRules: 规则。
+    """
+    _check_keys(
+        table,
+        (
+            "shared_groups",
+            "service_groups",
+            "shared_libs",
+            "service_packages",
+            "runtime_packages",
+            "layers",
+            "ownership",
+            "catalog",
+            "layout",
+            "exceptions",
+            "baseline",
+            "shared_models_marker",
+            "ops",
+            "counters",
+        ),
+        where,
+    )
+    layers = _table(table, "layers", f"{where}.layers")
+    _check_keys(layers, ("shared", "service"), f"{where}.layers")
+    ownership = _table(table, "ownership", f"{where}.ownership")
+    _check_keys(
+        ownership,
+        ("module", "const", "owner_every_service", "infrastructure_tables", "exempt_modules"),
+        f"{where}.ownership",
+    )
+    catalog = _table(table, "catalog", f"{where}.catalog")
+    _check_keys(catalog, ("module", "const"), f"{where}.catalog")
+    ops = _table(table, "ops", f"{where}.ops")
+    _check_keys(ops, ("dir", "dockerfile", "run_image_values", "image_packages"), f"{where}.ops")
+    return ServiceBoundariesRules(
+        shared_groups=_strings(table, "shared_groups", where, ("libs",)),
+        service_groups=_strings(table, "service_groups", where, ("services",)),
+        shared_libs=_strings(table, "shared_libs", where),
+        service_packages=_strings(table, "service_packages", where),
+        runtime_packages=_strings(table, "runtime_packages", where),
+        layers_shared=_list_map(layers, "shared", f"{where}.layers"),
+        layers_service=_list_map(layers, "service", f"{where}.layers"),
+        ownership_module=_string(ownership, "module", f"{where}.ownership"),
+        ownership_const=_string(ownership, "const", f"{where}.ownership"),
+        owner_every_service=_string(ownership, "owner_every_service", f"{where}.ownership"),
+        infrastructure_tables=_strings(ownership, "infrastructure_tables", f"{where}.ownership"),
+        exempt_modules=_strings(ownership, "exempt_modules", f"{where}.ownership"),
+        catalog_module=_string(catalog, "module", f"{where}.catalog"),
+        catalog_const=_string(catalog, "const", f"{where}.catalog"),
+        layout=_string(table, "layout", where),
+        exceptions=_string(table, "exceptions", where),
+        baseline=_string(table, "baseline", where),
+        shared_models_marker=_string(table, "shared_models_marker", where, ""),
+        ops_dir=_string(ops, "dir", f"{where}.ops", ""),
+        ops_dockerfile=_string(ops, "dockerfile", f"{where}.ops", ""),
+        run_image_values=_strings(ops, "run_image_values", f"{where}.ops"),
+        image_packages=_list_map(ops, "image_packages", f"{where}.ops"),
+        counters=_strings(table, "counters", where),
+    )
+
+
+def _parse_collections_rules(table: dict[str, Any], where: str) -> BareCollectionsRules:
+    """解析 `[rules.bare_collections]`。
+
+    Args:
+        table: 子表。
+        where: 位置描述。
+
+    Returns:
+        BareCollectionsRules: 规则。
+    """
+    _check_keys(
+        table,
+        (
+            "scan_targets",
+            "whitelist",
+            "banned",
+            "unregistered",
+            "tuple_forms",
+            "protocol_forms",
+            "implementation_files",
+            "allow_marker",
+            "baseline",
+            "baseline_version",
+            "reasons",
+            "exclude_parts",
+        ),
+        where,
+    )
+    banned = _table(table, "banned", f"{where}.banned")
+    _check_keys(banned, ("bare", "readonly", "ascending"), f"{where}.banned")
+    return BareCollectionsRules(
+        scan_targets=_strings(table, "scan_targets", where),
+        whitelist=_strings(table, "whitelist", where),
+        banned_bare=_strings(banned, "bare", f"{where}.banned"),
+        banned_readonly=_strings(banned, "readonly", f"{where}.banned"),
+        banned_ascending=_strings(banned, "ascending", f"{where}.banned"),
+        unregistered=_strings(table, "unregistered", where),
+        tuple_forms=_strings(table, "tuple_forms", where),
+        protocol_forms=_strings(table, "protocol_forms", where),
+        implementation_files=_strings(table, "implementation_files", where),
+        allow_marker=_string(table, "allow_marker", where),
+        baseline=_string(table, "baseline", where),
+        baseline_version=int(_scalar(table, "baseline_version", where, int, 1)),
+        reasons=_str_map(table, "reasons", where),
+        exclude_parts=_strings(table, "exclude_parts", where, ("__pycache__", ".venv", "node_modules", ".git")),
+    )
+
+
+def _parse_metrics_rules(table: dict[str, Any], where: str) -> MetricsRules:
+    """解析 `[rules.metrics]`。
+
+    Args:
+        table: 子表。
+        where: 位置描述。
+
+    Returns:
+        MetricsRules: 规则。
+    """
+    _check_keys(
+        table,
+        ("violation_keys", "cross_access_key", "registered_exceptions_key", "metric_name", "checker"),
+        where,
+    )
+    return MetricsRules(
+        violation_keys=_strings(table, "violation_keys", where),
+        cross_access_key=_string(table, "cross_access_key", where),
+        registered_exceptions_key=_string(table, "registered_exceptions_key", where),
+        metric_name=_string(table, "metric_name", where),
+        checker=_string(table, "checker", where, "service-boundaries"),
+    )
+
+
 def parse(raw: dict[str, Any], path: Path) -> Config:
     """把已解析的 TOML 映射转成配置对象。
 
@@ -794,7 +1685,59 @@ def parse(raw: dict[str, Any], path: Path) -> Config:
     backend_extra: tuple[ExtraTests, ...] = ()
     frontend_global = GlobalRule()
     rules = _table(raw, "rules", "rules")
-    _check_keys(rules, ("backend", "frontend"), "rules")
+    base_rule_set: BaseRules | None = None
+    backend_base_rule_set: BackendBaseRules | None = None
+    boundaries_rule_set: ServiceBoundariesRules | None = None
+    collections_rule_set: BareCollectionsRules | None = None
+    system_fields_rule_set: SystemFieldsRules | None = None
+    prototype_rule_set: PrototypeRules | None = None
+    env_example_rule_set: EnvExampleRules | None = None
+    docs_status_rule_set: DocsStatusRules | None = None
+    metrics_rule_set: MetricsRules | None = None
+    check_rule_keys = (
+        "backend",
+        "frontend",
+        "base",
+        "backend_base",
+        "service_boundaries",
+        "bare_collections",
+        "system_fields",
+        "prototype",
+        "env_example",
+        "docs_status",
+        "metrics",
+    )
+    _check_keys(rules, check_rule_keys, "rules")
+    if "base" in rules:
+        base_rule_set = _parse_base_rules(_table(rules, "base", "rules.base"), "rules.base")
+    if "backend_base" in rules:
+        backend_base_rule_set = _parse_backend_base_rules(
+            _table(rules, "backend_base", "rules.backend_base"), "rules.backend_base"
+        )
+    if "service_boundaries" in rules:
+        boundaries_rule_set = _parse_boundaries_rules(
+            _table(rules, "service_boundaries", "rules.service_boundaries"), "rules.service_boundaries"
+        )
+    if "bare_collections" in rules:
+        collections_rule_set = _parse_collections_rules(
+            _table(rules, "bare_collections", "rules.bare_collections"), "rules.bare_collections"
+        )
+    if "system_fields" in rules:
+        system_fields_rule_set = _parse_system_fields_rules(
+            _table(rules, "system_fields", "rules.system_fields"), "rules.system_fields"
+        )
+    if "prototype" in rules:
+        prototype_rule_set = _parse_prototype_rules(_table(rules, "prototype", "rules.prototype"), "rules.prototype")
+    if "env_example" in rules:
+        env_example_rule_set = _parse_env_example_rules(
+            _table(rules, "env_example", "rules.env_example"), "rules.env_example"
+        )
+    if "docs_status" in rules:
+        docs_status_rule_set = _parse_docs_status_rules(
+            _table(rules, "docs_status", "rules.docs_status"), "rules.docs_status"
+        )
+    if "metrics" in rules:
+        metrics_rule_set = _parse_metrics_rules(_table(rules, "metrics", "rules.metrics"), "rules.metrics")
     if "backend" in rules:
         backend_rules = _table(rules, "backend", "rules.backend")
         _check_keys(backend_rules, ("global", "extra_tests"), "rules.backend")
@@ -904,6 +1847,15 @@ def parse(raw: dict[str, Any], path: Path) -> Config:
         kiwi=kiwi,
         eol=eol,
         toolchain=toolchain,
+        base_rules=base_rule_set,
+        backend_base_rules=backend_base_rule_set,
+        boundaries_rules=boundaries_rule_set,
+        collections_rules=collections_rule_set,
+        system_fields_rules=system_fields_rule_set,
+        prototype_rules=prototype_rule_set,
+        env_example_rules=env_example_rule_set,
+        docs_status_rules=docs_status_rule_set,
+        metrics_rules=metrics_rule_set,
         base_threshold=int(_scalar(selection, "base_threshold", "selection", int, 100)),
         base_ratio=float(_scalar(selection, "base_ratio", "selection", float, 0.6)),
         backend_global=backend_global,

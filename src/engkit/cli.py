@@ -124,6 +124,47 @@ def _build_parser() -> argparse.ArgumentParser:
     listing.add_argument("--limit", type=int, default=10, help="条数")
     kiwi_actions.add_parser("ping", parents=[common], help="探测远端可达")
 
+    base_parser = subparsers.add_parser("base", parents=[common], help="基座校验器（规则取自 [rules.*]）")
+    base_actions = base_parser.add_subparsers(dest="checker", required=True)
+    base_named = (
+        ("base", "基座完整性（清单 / 跨层 / 命名 / 设计登记）"),
+        ("backend-base", "后端基类体系（继承链 / 错误码 / 迁移链）"),
+        ("bare-collections", "集合声明白名单"),
+        ("system-fields", "系统字段（form_key / data_source_key）"),
+        ("prototype-review", "界面「实现 ↔ 原型」对照"),
+        ("env-example", "环境变量模板键位"),
+        ("docs-status", "需求 / 任务 / 计划一致性"),
+    )
+    for name, text in base_named:
+        action = base_actions.add_parser(name, parents=[common], help=text)
+        if name in (
+            "base",
+            "backend-base",
+            "service-boundaries",
+            "bare-collections",
+            "system-fields",
+            "prototype-review",
+            "env-example",
+        ):
+            action.add_argument("--self-test", action="store_true", help="只跑内置判定向量")
+        if name in ("backend-base", "service-boundaries", "bare-collections"):
+            action.add_argument("--update-baseline", action="store_true", help="按当前扫描结果重写基线")
+        if name in ("service-boundaries", "bare-collections"):
+            action.add_argument("--json", action="store_true", help="以 JSON 输出结果")
+        if name == "bare-collections":
+            action.add_argument("--report", action="store_true", help="只打印统计报告")
+        if name == "prototype-review":
+            action.add_argument("--changed", nargs="?", const="", default=None, help="比较基准（缺省取配置）")
+            action.add_argument("--task", default="", help="只核对单个任务目录")
+        if name == "docs-status":
+            action.add_argument("--stage", default="", help="阶段目录名（缺省取配置）")
+            action.add_argument("--all", action="store_true", help="核对全部阶段")
+            action.add_argument("--strict", action="store_true", help="软提示同样阻断")
+        if name == "boundary-metrics":
+            action.add_argument("--metrics-url", default="", help="运行期指标端点（可选）")
+            action.add_argument("--out", default="", help="结果写为 JSON")
+            action.add_argument("--fail-on-violation", action="store_true", help="静态越界非零时退码 1")
+
     return parser
 
 
@@ -536,7 +577,60 @@ def _cmd_kiwi(args: argparse.Namespace) -> int:
     return kiwi.ping(cfg)
 
 
+def _cmd_base(args: argparse.Namespace) -> int:
+    """执行基座校验器（规则取自仓配置 `[rules.*]`）。
+
+    Args:
+        args: 解析结果。
+
+    Returns:
+        int: 退出码。
+    """
+    cfg = _load(args)
+    name = args.checker
+    if name == "base":
+        from .base import base_docs
+
+        return base_docs.run(cfg, as_self_test=bool(args.self_test))
+    if name == "backend-base":
+        from .base import backend_base
+
+        return backend_base.run(cfg, as_self_test=bool(args.self_test), update_baseline=bool(args.update_baseline))
+    if name == "bare-collections":
+        from .base import bare_collections
+
+        return bare_collections.run(
+            cfg,
+            json_output=bool(args.json),
+            report_mode=bool(args.report),
+            update_baseline=bool(args.update_baseline),
+            as_self_test=bool(args.self_test),
+        )
+    if name == "system-fields":
+        from .base import system_fields
+
+        return system_fields.run(cfg, as_self_test=bool(args.self_test))
+    if name == "prototype-review":
+        from .base import prototype_review
+
+        rule = cfg.prototype_rules
+        fallback = rule.base if rule is not None else ""
+        changed = "" if args.changed is None else (str(args.changed) or fallback)
+        return prototype_review.run(cfg, changed=changed, task=str(args.task), as_self_test=bool(args.self_test))
+    if name == "env-example":
+        from .base import env_example
+
+        return env_example.run(cfg, as_self_test=bool(args.self_test))
+    if name == "docs-status":
+        from .base import docs_status
+
+        return docs_status.run(cfg, stage=str(args.stage), all_stages=bool(args.all), strict=bool(args.strict))
+    out(f"[base] 未实现的校验器：{name}")
+    return 2
+
+
 _HANDLERS = {
+    "base": _cmd_base,
     "links": _cmd_links,
     "docs-scope": _cmd_docs_scope,
     "selection": _cmd_selection,
