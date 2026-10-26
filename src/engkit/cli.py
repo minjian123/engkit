@@ -129,11 +129,13 @@ def _build_parser() -> argparse.ArgumentParser:
     base_named = (
         ("base", "基座完整性（清单 / 跨层 / 命名 / 设计登记）"),
         ("backend-base", "后端基类体系（继承链 / 错误码 / 迁移链）"),
+        ("service-boundaries", "服务边界与跨库访问（服务维 + 域级）"),
         ("bare-collections", "集合声明白名单"),
         ("system-fields", "系统字段（form_key / data_source_key）"),
         ("prototype-review", "界面「实现 ↔ 原型」对照"),
         ("env-example", "环境变量模板键位"),
         ("docs-status", "需求 / 任务 / 计划一致性"),
+        ("boundary-metrics", "服务边界与跨库访问度量采集"),
     )
     for name, text in base_named:
         action = base_actions.add_parser(name, parents=[common], help=text)
@@ -596,6 +598,24 @@ def _cmd_base(args: argparse.Namespace) -> int:
         from .base import backend_base
 
         return backend_base.run(cfg, as_self_test=bool(args.self_test), update_baseline=bool(args.update_baseline))
+    if name == "service-boundaries":
+        from .base import service_boundaries
+
+        return service_boundaries.run(
+            cfg,
+            json_output=bool(args.json),
+            update_baseline=bool(args.update_baseline),
+            as_self_test=bool(args.self_test),
+        )
+    if name == "boundary-metrics":
+        from .base import metrics
+
+        return metrics.run(
+            cfg,
+            metrics_url=str(args.metrics_url),
+            out_path=str(args.out),
+            fail_on_violation=bool(args.fail_on_violation),
+        )
     if name == "bare-collections":
         from .base import bare_collections
 
@@ -621,12 +641,9 @@ def _cmd_base(args: argparse.Namespace) -> int:
         from .base import env_example
 
         return env_example.run(cfg, as_self_test=bool(args.self_test))
-    if name == "docs-status":
-        from .base import docs_status
+    from .base import docs_status
 
-        return docs_status.run(cfg, stage=str(args.stage), all_stages=bool(args.all), strict=bool(args.strict))
-    out(f"[base] 未实现的校验器：{name}")
-    return 2
+    return docs_status.run(cfg, stage=str(args.stage), all_stages=bool(args.all), strict=bool(args.strict))
 
 
 _HANDLERS = {

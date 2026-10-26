@@ -473,7 +473,8 @@ def check_stage(stage_dir: Path, report: Report, spec: Spec, req_index: dict[str
     tasks = collect_tasks(stage_dir, report, spec, req_index)
 
     task_root = stage_dir / "任务"
-    for domain_dir in sorted(p for p in task_root.iterdir() if p.is_dir()):
+    domain_dirs = sorted(p for p in task_root.iterdir() if p.is_dir()) if task_root.is_dir() else []
+    for domain_dir in domain_dirs:
         domain = domain_dir.name.split("_")[0]
         overview_doc = domain_dir / f"{domain_dir.name}.md"
         if not overview_doc.is_file():

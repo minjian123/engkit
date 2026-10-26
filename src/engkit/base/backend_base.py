@@ -475,9 +475,6 @@ def check_error_segments(cfg: Config, rule: BackendBaseRules, outcome: Outcome) 
         count += 1
         if not (10000 <= value <= 99999):
             outcome.problems.append(f"[错误码] {name} = {value} 不是 5 位平台码（产品段 10xxxx 起不得混入）")
-            continue
-        if str(value)[0] not in "123456789":
-            outcome.problems.append(f"[错误码] {name} = {value} 万位段超出平台段（1~9）")
     return count
 
 

@@ -341,9 +341,6 @@ def collect_problems(cfg: Config, rule: SystemFieldsRules) -> list[str]:
             problems.append(f"{label} 枚举不可解析：{spec.const} → {spec.enum}")
             continue
         declarations = parse_kind_declarations(cfg, spec)
-        if not declarations:
-            problems.append(f"{label} 清单不可解析或为空：{spec.const}")
-            continue
         problems.extend(f"{label} {item}" for item in diff_explicit_kind(declarations, set(enum_values.values())))
     return problems
 

@@ -601,6 +601,11 @@ class ServiceBoundariesRules:
         run_image_values: `RUN_IMAGE` 合法取值。
         image_packages: 镜像 → 所含包集合。
         counters: 分类计数键清单。
+        no_domain_tables: 不归业务域的表（`domain` 恒空）。
+        package_prefix: 服务包名前缀（去前缀得服务标识）。
+        shared_lib_service: 共享库包归属的服务标识。
+        domain_subdir: 域子包目录名（`domains/<域>/<层>`）。
+        shared_table_prefixes: 平台共享表前缀（按表级归属判定、不判前缀冲突）。
     """
 
     shared_groups: tuple[str, ...]
@@ -626,6 +631,11 @@ class ServiceBoundariesRules:
     run_image_values: tuple[str, ...]
     image_packages: dict[str, tuple[str, ...]]
     counters: tuple[str, ...]
+    no_domain_tables: tuple[str, ...] = ()
+    package_prefix: str = ""
+    shared_lib_service: str = ""
+    domain_subdir: str = "domains"
+    shared_table_prefixes: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -1514,6 +1524,10 @@ def _parse_boundaries_rules(table: dict[str, Any], where: str) -> ServiceBoundar
             "shared_models_marker",
             "ops",
             "counters",
+            "package_prefix",
+            "shared_lib_service",
+            "domain_subdir",
+            "shared_table_prefixes",
         ),
         where,
     )
@@ -1522,7 +1536,7 @@ def _parse_boundaries_rules(table: dict[str, Any], where: str) -> ServiceBoundar
     ownership = _table(table, "ownership", f"{where}.ownership")
     _check_keys(
         ownership,
-        ("module", "const", "owner_every_service", "infrastructure_tables", "exempt_modules"),
+        ("module", "const", "owner_every_service", "infrastructure_tables", "exempt_modules", "no_domain_tables"),
         f"{where}.ownership",
     )
     catalog = _table(table, "catalog", f"{where}.catalog")
@@ -1553,6 +1567,11 @@ def _parse_boundaries_rules(table: dict[str, Any], where: str) -> ServiceBoundar
         run_image_values=_strings(ops, "run_image_values", f"{where}.ops"),
         image_packages=_list_map(ops, "image_packages", f"{where}.ops"),
         counters=_strings(table, "counters", where),
+        no_domain_tables=_strings(ownership, "no_domain_tables", f"{where}.ownership"),
+        package_prefix=_string(table, "package_prefix", where, ""),
+        shared_lib_service=_string(table, "shared_lib_service", where, ""),
+        domain_subdir=_string(table, "domain_subdir", where, "domains"),
+        shared_table_prefixes=_strings(table, "shared_table_prefixes", where),
     )
 
 
