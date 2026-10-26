@@ -294,6 +294,19 @@ class KiwiConfig:
 
 
 @dataclass(frozen=True)
+class EolConfig:
+    """行尾护栏配置（`[eol]`）。
+
+    Attributes:
+        skip_prefixes: 不纳入检查的路径前缀（相对仓库根）。
+        include_suffixes: 只检查这些后缀（为空表示不按后缀过滤）。
+    """
+
+    skip_prefixes: tuple[str, ...] = ()
+    include_suffixes: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class Config:
     """一份仓配置。
 
@@ -310,6 +323,7 @@ class Config:
         runonce: 回放配置。
         guard: 重命令拦截配置。
         kiwi: 用例登记配置。
+        eol: 行尾护栏配置。
         base_threshold: 基础模块绝对阈值。
         base_ratio: 基础模块占比阈值。
         backend_global: 后端全局变更规则。
@@ -329,6 +343,7 @@ class Config:
     runonce: RunOnceConfig
     guard: GuardConfig
     kiwi: KiwiConfig
+    eol: EolConfig = field(default_factory=EolConfig)
     base_threshold: int = 100
     base_ratio: float = 0.6
     backend_global: GlobalRule = field(default_factory=GlobalRule)
@@ -375,6 +390,7 @@ _TOP_KEYS = (
     "runonce",
     "guard",
     "kiwi",
+    "eol",
 )
 
 _MISSING: Any = object()
@@ -842,6 +858,13 @@ def parse(raw: dict[str, Any], path: Path) -> Config:
         manage=_string(kiwi_table, "manage", "kiwi", "/Kiwi/manage.py"),
     )
 
+    eol_table = _table(raw, "eol", "eol")
+    _check_keys(eol_table, ("skip_prefixes", "include_suffixes"), "eol")
+    eol = EolConfig(
+        skip_prefixes=_strings(eol_table, "skip_prefixes", "eol"),
+        include_suffixes=_strings(eol_table, "include_suffixes", "eol"),
+    )
+
     return Config(
         path=path,
         root=root,
@@ -855,6 +878,7 @@ def parse(raw: dict[str, Any], path: Path) -> Config:
         runonce=runonce,
         guard=guard,
         kiwi=kiwi,
+        eol=eol,
         base_threshold=int(_scalar(selection, "base_threshold", "selection", int, 100)),
         base_ratio=float(_scalar(selection, "base_ratio", "selection", float, 0.6)),
         backend_global=backend_global,

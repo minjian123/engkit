@@ -1,0 +1,6 @@
+{
+  // 行尾统一 LF：新文件一律按 LF 保存，避免 Windows 上编辑器 / 工具默认写 CRLF。
+  // 与 .gitattributes（* text=auto eol=lf）和 .editorconfig（end_of_line = lf）同口径；
+  // *.bat / *.cmd / *.ps1 的行尾例外由 .gitattributes 在提交侧保证，不受本项影响。
+  "files.eol": "\n"
+}

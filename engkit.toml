@@ -23,6 +23,7 @@ data_file = ".cache/coverage/.coverage"
 [preflight]
 # 自举烟雾：只跑静态与工具链自检（用例与覆盖率由 base-gate 直跑，不在此重复）
 steps = [
+  { label = "行尾：工作树 CRLF 检查", cmd = ["uv", "run", "engkit", "eol", "--quiet"] },
   { label = "静态：ruff check", cmd = ["uv", "run", "ruff", "check", "."] },
   { label = "静态：ruff format --check", cmd = ["uv", "run", "ruff", "format", "--check", "."] },
   { label = "静态：pyright", cmd = ["uv", "run", "pyright", "--outputjson"] },

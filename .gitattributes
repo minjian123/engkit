@@ -1,0 +1,29 @@
+# 统一行尾符：文本文件按 LF 检出（Windows / Linux 双端一致）
+* text=auto eol=lf
+
+# Shell 脚本必须 LF（Git Bash / Linux 均按 LF 执行）
+*.sh text eol=lf
+
+# Windows 脚本按 CRLF 检出（cmd / PowerShell 兼容）
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# 二进制资产不做行尾符转换与文本 diff
+*.png binary
+*.ico binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.avif binary
+*.bmp binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.otf binary
+*.eot binary
+*.zip binary
+*.7z binary
+*.gz binary
+*.pdf binary

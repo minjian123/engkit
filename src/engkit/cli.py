@@ -11,7 +11,7 @@ import json
 import sys
 from pathlib import Path
 
-from . import coverage, docs_links, docs_scope, gitutil, guard, kiwi, preflight, runonce, selection
+from . import coverage, docs_links, docs_scope, eol, gitutil, guard, kiwi, preflight, runonce, selection
 from .config import CONFIG_NAME, Config, ConfigError, load_for
 from .console import configure_stdio, error, out
 
@@ -109,6 +109,10 @@ def _build_parser() -> argparse.ArgumentParser:
     ):
         action = actions.add_parser(name, parents=[common], help=text)
         action.add_argument("--venv", default="", help="虚拟环境目录（缺省取配置）")
+
+    eol_parser = subparsers.add_parser("eol", parents=[common], help="行尾护栏（工作树 CRLF 检查）")
+    eol_parser.add_argument("--quiet", action="store_true", help="只打印结论行")
+    eol_parser.add_argument("--fix", action="store_true", help="就地修正为 LF（写回工作树）")
 
     kiwi_parser = subparsers.add_parser("kiwi", parents=[common], help="Kiwi TCMS 用例登记与回读")
     kiwi_actions = kiwi_parser.add_subparsers(dest="action", required=True)
@@ -484,6 +488,37 @@ def _cmd_guard(args: argparse.Namespace) -> int:
     return guard.remove_hook(found)
 
 
+def _cmd_eol(args: argparse.Namespace) -> int:
+    """执行行尾检查（可选就地修正）。
+
+    Args:
+        args: 解析结果。
+
+    Returns:
+        int: 退出码。
+    """
+    cfg = _load(args)
+    report = eol.check(cfg.root, cfg.eol)
+    if report.skipped:
+        out(f"[eol] {report.skipped}")
+        return 0
+    if args.fix and report.findings:
+        fixed = eol.normalize(cfg.root, report)
+        out(f"[eol] 已把 {len(fixed)} 个文件改回 LF")
+        return 0
+    out(f"[eol] 检查 {report.files} 个文件：行尾违规 {len(report.findings)} 个")
+    if not args.quiet:
+        for item in report.findings[:50]:
+            error(f"{item.file}: 工作树为 {item.actual}，按 .gitattributes 应为 {item.expected}")
+        if len(report.findings) > 50:
+            error(f"...（其余 {len(report.findings) - 50} 个从略）")
+    if report.findings:
+        if not args.quiet:
+            error("改用 LF 保存：编辑器设 files.eol，脚本写文件显式指定 newline；或执行 engkit eol --fix")
+        return 1
+    return 0
+
+
 def _cmd_kiwi(args: argparse.Namespace) -> int:
     """执行用例登记相关动作。
 
@@ -510,6 +545,7 @@ _HANDLERS = {
     "preflight": _cmd_preflight,
     "run-once": _cmd_run_once,
     "guard": _cmd_guard,
+    "eol": _cmd_eol,
     "kiwi": _cmd_kiwi,
 }
 """子命令 → 处理函数。"""
