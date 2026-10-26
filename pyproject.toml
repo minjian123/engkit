@@ -63,7 +63,8 @@ reportUnknownParameterType = false
 [tool.pytest.ini_options]
 addopts = "--import-mode=importlib --basetemp=.cache/pytest"
 testpaths = ["tests"]
-pythonpath = ["src"]
+# `tests` 自身也在路径上：各用例文件共用 `base_fixtures`（规则段样例与迷你仓库构造）
+pythonpath = ["src", "tests"]
 markers = [
     "kiwi_id: Kiwi TCMS 用例编号（如 @pytest.mark.kiwi_id(1)）",
 ]

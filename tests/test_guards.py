@@ -37,11 +37,23 @@ PASS_CMD = f'"{sys.executable}" -c pass'
 
 @pytest.mark.kiwi_id(2347)
 def test_package_has_no_repo_literals() -> None:
-    """包内无仓名字面（新增仓库接入只加配置，不改代码）。"""
+    """包内无仓名字面（递归含 `base/` 子包；新增仓库接入只加配置，不改代码）。"""
     offenders: list[str] = []
-    for path in sorted(SRC.glob("*.py")):
+    for path in sorted(SRC.rglob("*.py")):
         text = path.read_text(encoding="utf-8")
         for token in FORBIDDEN:
+            if token in text:
+                offenders.append(f"{path.relative_to(SRC).as_posix()}: {token}")
+    assert offenders == []
+
+
+@pytest.mark.kiwi_id(2347)
+def test_base_subpackage_reads_rules_from_config() -> None:
+    """基座校验器子包只读配置：不内嵌仓内文档根 / 包名（规则数据只在各仓 `engkit.toml`）。"""
+    offenders: list[str] = []
+    for path in sorted((SRC / "base").rglob("*.py")):
+        text = path.read_text(encoding="utf-8")
+        for token in ("bms文档", "mdm文档", "bms_core", "bms_platform", "bms_testing_plugin"):
             if token in text:
                 offenders.append(f"{path.name}: {token}")
     assert offenders == []
