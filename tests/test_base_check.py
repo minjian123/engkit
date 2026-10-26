@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 
+from engkit import cli
 from engkit.base import (
     backend_base,
     bare_collections,
@@ -353,3 +354,80 @@ def test_prototype_review_run_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     (task_dir / "测试").mkdir(parents=True)
     assert prototype_review.run(cfg, changed="", task=str(tmp_path / "missing"), as_self_test=False) == 2
     assert prototype_review.run(cfg, changed="", task=str(task_dir), as_self_test=False) == 0
+
+
+def _backend_repo(tmp_path: Path) -> None:
+    """搭最小后端基类体系仓库（成功路径）。
+
+    Args:
+        tmp_path: 临时仓根。
+    """
+    (tmp_path / "src/pkg").mkdir(parents=True)
+    (tmp_path / "src/pkg/base.py").write_text(
+        "class BaseObj(object):\n    pass\n\n\nclass BaseMid(BaseObj):\n    pass\n", encoding="utf-8"
+    )
+    (tmp_path / "docs").mkdir(parents=True)
+    (tmp_path / "docs/契约.md").write_text(
+        "## 7. 继承链与代码位置\n\n- `BaseMid → BaseObj`。\n\n体系根清单\n\n- `BaseObj`\n", encoding="utf-8"
+    )
+    (tmp_path / "docs/基类清单.md").write_text("| BaseObj | 体系根 |\n", encoding="utf-8")
+    (tmp_path / "src/errors.py").write_text("class ErrorCode:\n    OK = 10001\n", encoding="utf-8")
+    (tmp_path / "versions/platform/tenant").mkdir(parents=True)
+    (tmp_path / "versions/platform/tenant/0001_init.py").write_text(
+        'revision = "0001"\ndown_revision = None\nbranch_labels = ("platform:tenant",)\n', encoding="utf-8"
+    )
+    (tmp_path / "alembic.ini").write_text("[alembic]\n", encoding="utf-8")
+
+
+def test_backend_base_full_flow(tmp_path: Path) -> None:
+    """后端基类体系：完整仓库通过；逐项制造违规即拦截。"""
+    _backend_repo(tmp_path)
+    cfg = _cfg(tmp_path)
+    assert backend_base.run(cfg, as_self_test=False, update_baseline=False) == 0
+
+    chain = tmp_path / "docs/契约.md"
+    chain.write_text(
+        "## 7. 继承链与代码位置\n\n- `BaseOther → BaseObj`。\n\n体系根清单\n\n- `BaseObj`\n", encoding="utf-8"
+    )
+    assert backend_base.run(cfg, as_self_test=False, update_baseline=False) == 1
+
+    chain.write_text("## 7. 继承链与代码位置\n\n- `BaseMid → BaseObj`。\n", encoding="utf-8")
+    assert backend_base.run(cfg, as_self_test=False, update_baseline=False) == 1
+
+    chain.write_text(
+        "## 7. 继承链与代码位置\n\n- `BaseMid → BaseObj`。\n\n体系根清单\n\n- `BaseObj`\n", encoding="utf-8"
+    )
+    (tmp_path / "src/errors.py").write_text("class ErrorCode:\n    BAD = 100001\n", encoding="utf-8")
+    assert backend_base.run(cfg, as_self_test=False, update_baseline=False) == 1
+
+    (tmp_path / "src/errors.py").write_text("class ErrorCode:\n    OK = 10001\n", encoding="utf-8")
+    (tmp_path / "versions/platform/tenant/0002_b.py").write_text(
+        'revision = "0002"\ndown_revision = "ghost"\nbranch_labels = None\n', encoding="utf-8"
+    )
+    assert backend_base.run(cfg, as_self_test=False, update_baseline=False) == 1
+
+
+def test_backend_base_direct_inheritance_scan(tmp_path: Path) -> None:
+    """直继承扫描：未登记体系根之外的直继承被拦，基线可吸收。"""
+    _backend_repo(tmp_path)
+    (tmp_path / "src/pkg/extra.py").write_text("class Direct(BaseObject):\n    pass\n", encoding="utf-8")
+    (tmp_path / "docs/基类清单.md").write_text("| BaseObj | 体系根 |\n| Direct | 存量 |\n", encoding="utf-8")
+    cfg = _cfg(tmp_path)
+    assert backend_base.run(cfg, as_self_test=False, update_baseline=False) == 1
+    assert backend_base.run(cfg, as_self_test=False, update_baseline=True) == 0
+    assert backend_base.run(cfg, as_self_test=False, update_baseline=False) == 0
+
+
+def test_cli_base_dispatch(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """CLI 分派：七个子命令均可解析，未知名退 2。"""
+    config = tmp_path / "engkit.toml"
+    config.write_text(RULES_TOML + '\n[docs]\nroot = "docs"\n', encoding="utf-8")
+    root = ["--root", str(tmp_path), "--config", str(config)]
+    assert cli.main(["base", "env-example", *root]) == 2
+    assert cli.main(["base", "system-fields", "--self-test", *root]) == 0
+    assert cli.main(["base", "docs-status", *root]) == 2
+    assert cli.main(["base", "prototype-review", "--self-test", *root]) == 0
+    assert cli.main(["base", "bare-collections", "--report", *root]) == 0
+    assert cli.main(["base", "base", "--self-test", *root]) == 0
+    assert cli.main(["base", "backend-base", "--self-test", *root]) == 0
+    capsys.readouterr()
