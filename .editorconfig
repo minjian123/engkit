@@ -6,6 +6,10 @@ end_of_line = lf
 insert_final_newline = true
 trim_trailing_whitespace = true
 
+# Windows 批处理 / PowerShell 脚本按 CRLF 检出（口径同各仓 .gitattributes 的 *.bat/*.cmd/*.ps1）
+[*.{bat,cmd,ps1}]
+end_of_line = crlf
+
 [*.py]
 indent_style = space
 indent_size = 4
