@@ -28,6 +28,10 @@ variables:
   UV_LINK_MODE: copy
 
 .setup: &setup
+  # pyright 经 pyright-python 拉 node 运行，`python:3.14-slim` 缺 `libatomic.so.1` 会导致 node 启动失败
+  # （2026-10-28 实测：`libatomic.so.1: cannot open shared object file`，exit 127）；apt 走清华镜像
+  - sed -i 's|deb.debian.org|mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.list.d/debian.sources
+  - apt-get update && apt-get install -y --no-install-recommends libatomic1
   - pip install --no-cache-dir uv
   - uv sync --frozen
 
