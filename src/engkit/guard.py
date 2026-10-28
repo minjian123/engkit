@@ -76,7 +76,7 @@ def is_ci() -> bool:
 
 
 def is_wrapped() -> bool:
-    """本次调用是否经 `engkit run-once` 包装。
+    """本次调用是否经 `engkit run_once` 包装。
 
     Returns:
         bool: 已包装返回 True。
@@ -227,7 +227,7 @@ def heavy_guidance(kind: str) -> str:
     return (
         f"[重命令守卫] 拒绝执行：本地非 CI 环境未经包装跑重命令（{kind}）。\n"
         "  重命令（分钟级 / 数十秒级）一律经包装调用，避免重复执行与为挑报错重跑：\n"
-        "    engkit run-once -- <原命令>\n"
+        "    engkit run_once -- <原命令>\n"
         "  包装口径：缓存键 =「命令 + 工作目录 + 工作区指纹」，窗口内命中即回放；\n"
         "  改完代码想立刻重验加 `--force`，只想看缓存状态用 `--show`。\n"
         "  单文件 / 单节点调用（秒级）不受此限。\n"

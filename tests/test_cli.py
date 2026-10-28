@@ -198,12 +198,12 @@ def test_preflight_ci(repo: Path, monkeypatch, capsys) -> None:
 
 def test_run_once(repo: Path, capsys) -> None:
     """重命令包装：缺命令 / 正常执行 / 只看缓存。"""
-    assert cli.main(["run-once", "--root", str(repo)]) == 2
+    assert cli.main(["run_once", "--root", str(repo)]) == 2
     assert "缺少命令" in capsys.readouterr().err
     cmd = [sys.executable, "-c", "print('wrapped')"]
-    assert cli.main(["run-once", "--root", str(repo), "--", *cmd]) == 0
+    assert cli.main(["run_once", "--root", str(repo), "--", *cmd]) == 0
     assert "wrapped" in capsys.readouterr().out
-    assert cli.main(["run-once", "--root", str(repo), "--show", "--", *cmd]) == 0
+    assert cli.main(["run_once", "--root", str(repo), "--show", "--", *cmd]) == 0
     assert "缓存命中" in capsys.readouterr().out
 
 

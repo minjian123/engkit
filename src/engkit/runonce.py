@@ -1,4 +1,4 @@
-"""重命令「跑一次」（`engkit run-once`）：同命令 + 同工作区状态下短窗内只真跑一次。
+"""重命令「跑一次」（`engkit run_once`）：同命令 + 同工作区状态下短窗内只真跑一次。
 
 缓存键 =「命令 + 工作目录 + 工作区指纹」；工作区指纹含 `HEAD` 与全部变更文件内容哈希，
 **改一个源文件即失效**。窗口内命中即回放上次完整输出与退出码，改完代码要立刻重验用 `--force`。
@@ -178,28 +178,28 @@ def run(
 
     if show_only:
         if record is None:
-            emit(f"[run-once] 无缓存：{key}（指纹 {fingerprint[:12]}）")
+            emit(f"[run_once] 无缓存：{key}（指纹 {fingerprint[:12]}）")
         else:
             emit(
-                f"[run-once] 缓存命中：{key}（{age:.0f}s 前，退出码 {record.exit_code}，"
+                f"[run_once] 缓存命中：{key}（{age:.0f}s 前，退出码 {record.exit_code}，"
                 f"窗口 {window_seconds}s，{'有效' if fresh else '已过期'}）"
             )
         return 0
 
     if fresh and not force and record is not None:
         emit(
-            f"[run-once] 回放上次结果（{age:.0f}s 前真跑，退出码 {record.exit_code}；"
+            f"[run_once] 回放上次结果（{age:.0f}s 前真跑，退出码 {record.exit_code}；"
             f"工作区指纹 {fingerprint[:12]} 未变。确需重跑加 --force）"
         )
         emit(record.stdout)
         if record.truncated:
-            emit("[run-once] 注意：上次输出曾截断。")
+            emit("[run_once] 注意：上次输出曾截断。")
         return record.exit_code
 
     if record is not None and not force:
-        emit(f"[run-once] 缓存已过期（{age:.0f}s > {window_seconds}s），真跑：{' '.join(argv)}")
+        emit(f"[run_once] 缓存已过期（{age:.0f}s > {window_seconds}s），真跑：{' '.join(argv)}")
     elif force:
-        emit(f"[run-once] --force 真跑：{' '.join(argv)}")
+        emit(f"[run_once] --force 真跑：{' '.join(argv)}")
 
     started_at = time.time()
     child_env = {**os.environ, WRAPPED_ENV: "1"}
@@ -237,5 +237,5 @@ def run(
             truncated=truncated,
         ),
     )
-    emit(f"[run-once] 已记录（{duration:.1f}s，退出码 {returncode}，键 {key}）")
+    emit(f"[run_once] 已记录（{duration:.1f}s，退出码 {returncode}，键 {key}）")
     return returncode

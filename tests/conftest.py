@@ -83,7 +83,7 @@ self_tests = [
 ]
 
 [runonce]
-cache_dir = ".cache/run-once"
+cache_dir = ".cache/run_once"
 window_seconds = 1800
 
 [guard]

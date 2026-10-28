@@ -257,7 +257,7 @@ class RunOnceConfig:
         window_seconds: 回放窗口（秒）。
     """
 
-    cache_dir: str = ".cache/run-once"
+    cache_dir: str = ".cache/run_once"
     window_seconds: int = 1800
 
 
@@ -1827,7 +1827,7 @@ def parse(raw: dict[str, Any], path: Path) -> Config:
     runonce_table = _table(raw, "runonce", "runonce")
     _check_keys(runonce_table, ("cache_dir", "window_seconds"), "runonce")
     runonce = RunOnceConfig(
-        cache_dir=_string(runonce_table, "cache_dir", "runonce", ".cache/run-once"),
+        cache_dir=_string(runonce_table, "cache_dir", "runonce", ".cache/run_once"),
         window_seconds=int(_scalar(runonce_table, "window_seconds", "runonce", int, 1800)),
     )
 

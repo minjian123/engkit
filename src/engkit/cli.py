@@ -1,7 +1,7 @@
 """命令行入口：`engkit <子命令>`。
 
 子命令：`links` / `docs-scope` / `selection` / `run-selected` / `run-changed` / `coverage` /
-`preflight` / `run-once` / `guard` / `kiwi`。各仓的既有入口脚本只做转发，参数与退出码保持不变。
+`preflight` / `run_once` / `guard` / `kiwi`。各仓的既有入口脚本只做转发，参数与退出码保持不变。
 """
 
 from __future__ import annotations
@@ -100,7 +100,7 @@ def _build_parser() -> argparse.ArgumentParser:
     pre.add_argument("--step-seconds", type=float, default=None, help="单步预算（秒）")
     pre.add_argument("--self-test", action="store_true", help="只跑引擎自检")
 
-    once = subparsers.add_parser("run-once", help="重命令包装（缓存回放）")
+    once = subparsers.add_parser("run_once", help="重命令包装（缓存回放）")
     once.add_argument("--force", action="store_true", help="忽略缓存真跑")
     once.add_argument("--show", action="store_true", help="只看缓存状态，不执行")
     once.add_argument("--window-seconds", type=int, default=None, help="缓存窗口（秒）")
@@ -513,7 +513,7 @@ def _cmd_run_once(args: argparse.Namespace) -> int:
     if argv and argv[0] == "--":
         argv = argv[1:]
     if not argv:
-        error("[run-once] 缺少命令：用法 `engkit run-once [选项] -- <命令...>`")
+        error("[run_once] 缺少命令：用法 `engkit run_once [选项] -- <命令...>`")
         return 2
     cfg = _load(args)
     cache_dir = Path(args.cache_dir) if args.cache_dir else cfg.root / cfg.runonce.cache_dir
@@ -690,7 +690,7 @@ _HANDLERS = {
     "run-changed": _cmd_run_changed,
     "coverage": _cmd_coverage,
     "preflight": _cmd_preflight,
-    "run-once": _cmd_run_once,
+    "run_once": _cmd_run_once,
     "guard": _cmd_guard,
     "eol": _cmd_eol,
     "kiwi": _cmd_kiwi,

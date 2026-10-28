@@ -117,7 +117,7 @@ def test_full_test_should_block(monkeypatch) -> None:
 def test_guidance_texts() -> None:
     """提示文案包含包装命令与逃生开关。"""
     heavy = guard.heavy_guidance("pytest")
-    assert "engkit run-once" in heavy
+    assert "engkit run_once" in heavy
     assert guard.ALLOW_ENV in heavy
     full = guard.full_test_guidance()
     assert "engkit run-selected" in full
