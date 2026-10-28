@@ -697,6 +697,39 @@ class MetricsRules:
 
 
 @dataclass(frozen=True)
+class ProductLiteralsRules:
+    """产品字面量护栏规则（`[rules.product_literals]`）。
+
+    Attributes:
+        enabled: 是否启用（产品仓可显式关闭）。
+        deny_globs: 禁入面（相对仓根的 posix glob；命中即违规）。
+        allow_globs: 允许面（合规出现位置，优先于禁入面判定）。
+        exclude_globs: 排除面（生成物 / 构建产物，不进扫描与统计）。
+        literals: 需拦截的产品标识清单。
+        include_comments: 注释与 docstring 是否计入。
+        combine_suffixes: 组合形态后缀（标识紧邻这些字符仍算违规）。
+        baseline: 存量基线 JSON 路径。
+        baseline_ref: 只减不增断言的比较基准（git ref；空串不校验）。
+        exempt_marker: 行内豁免标记前缀（理由必须非空）。
+        baseline_version: 基线格式版本。
+        include_extensions: 参与扫描的扩展名（按文件后缀过滤）。
+    """
+
+    deny_globs: tuple[str, ...]
+    literals: tuple[str, ...]
+    enabled: bool = True
+    allow_globs: tuple[str, ...] = ()
+    exclude_globs: tuple[str, ...] = ()
+    include_comments: bool = True
+    combine_suffixes: tuple[str, ...] = ("_", ".", ":", "-")
+    baseline: str = ""
+    baseline_ref: str = ""
+    exempt_marker: str = "product-literal:allow:"
+    baseline_version: int = 1
+    include_extensions: tuple[str, ...] = (".py", ".ts", ".tsx", ".vue", ".js", ".mjs")
+
+
+@dataclass(frozen=True)
 class Config:
     """一份仓配置。
 
@@ -724,6 +757,7 @@ class Config:
         env_example_rules: 环境模板规则（未登记为 None）。
         docs_status_rules: 文档一致性规则（未登记为 None）。
         metrics_rules: 边界度量规则（未登记为 None）。
+        product_literals_rules: 产品字面量护栏规则（未登记为 None）。
         base_threshold: 基础模块绝对阈值。
         base_ratio: 基础模块占比阈值。
         depth: 选测依赖深度（`closure` 传递闭包 / `direct` 直接依赖）。
@@ -757,6 +791,7 @@ class Config:
     env_example_rules: EnvExampleRules | None = None
     docs_status_rules: DocsStatusRules | None = None
     metrics_rules: MetricsRules | None = None
+    product_literals_rules: ProductLiteralsRules | None = None
     base_threshold: int = 100
     base_ratio: float = 0.6
     depth: str = "closure"
@@ -1655,6 +1690,56 @@ def _parse_metrics_rules(table: dict[str, Any], where: str) -> MetricsRules:
     )
 
 
+def _parse_product_literals_rules(table: dict[str, Any], where: str) -> ProductLiteralsRules:
+    """解析 `[rules.product_literals]`。
+
+    Args:
+        table: 子表。
+        where: 位置描述。
+
+    Returns:
+        ProductLiteralsRules: 规则。
+
+    Raises:
+        ConfigError: 标识清单为空或字段非法。
+    """
+    _check_keys(
+        table,
+        (
+            "enabled",
+            "deny_globs",
+            "allow_globs",
+            "exclude_globs",
+            "literals",
+            "include_comments",
+            "combine_suffixes",
+            "baseline",
+            "baseline_ref",
+            "exempt_marker",
+            "baseline_version",
+            "include_extensions",
+        ),
+        where,
+    )
+    literals = _strings(table, "literals", where)
+    if not literals:
+        raise _fail(where, "`literals` 不得为空（否则规则形同虚设）")
+    return ProductLiteralsRules(
+        deny_globs=_strings(table, "deny_globs", where),
+        literals=literals,
+        enabled=_scalar(table, "enabled", where, bool, True),
+        allow_globs=_strings(table, "allow_globs", where),
+        exclude_globs=_strings(table, "exclude_globs", where),
+        include_comments=_scalar(table, "include_comments", where, bool, True),
+        combine_suffixes=_strings(table, "combine_suffixes", where, ("_", ".", ":", "-")),
+        baseline=_string(table, "baseline", where, ""),
+        baseline_ref=_string(table, "baseline_ref", where, ""),
+        exempt_marker=_string(table, "exempt_marker", where, "product-literal:allow:"),
+        baseline_version=int(_scalar(table, "baseline_version", where, int, 1)),
+        include_extensions=_strings(table, "include_extensions", where, (".py", ".ts", ".tsx", ".vue", ".js", ".mjs")),
+    )
+
+
 def parse(raw: dict[str, Any], path: Path) -> Config:
     """把已解析的 TOML 映射转成配置对象。
 
@@ -1725,6 +1810,7 @@ def parse(raw: dict[str, Any], path: Path) -> Config:
     env_example_rule_set: EnvExampleRules | None = None
     docs_status_rule_set: DocsStatusRules | None = None
     metrics_rule_set: MetricsRules | None = None
+    product_literals_rule_set: ProductLiteralsRules | None = None
     check_rule_keys = (
         "backend",
         "frontend",
@@ -1737,6 +1823,7 @@ def parse(raw: dict[str, Any], path: Path) -> Config:
         "env_example",
         "docs_status",
         "metrics",
+        "product_literals",
     )
     _check_keys(rules, check_rule_keys, "rules")
     if "base" in rules:
@@ -1769,6 +1856,10 @@ def parse(raw: dict[str, Any], path: Path) -> Config:
         )
     if "metrics" in rules:
         metrics_rule_set = _parse_metrics_rules(_table(rules, "metrics", "rules.metrics"), "rules.metrics")
+    if "product_literals" in rules:
+        product_literals_rule_set = _parse_product_literals_rules(
+            _table(rules, "product_literals", "rules.product_literals"), "rules.product_literals"
+        )
     if "backend" in rules:
         backend_rules = _table(rules, "backend", "rules.backend")
         _check_keys(backend_rules, ("global", "extra_tests"), "rules.backend")
@@ -1887,6 +1978,7 @@ def parse(raw: dict[str, Any], path: Path) -> Config:
         env_example_rules=env_example_rule_set,
         docs_status_rules=docs_status_rule_set,
         metrics_rules=metrics_rule_set,
+        product_literals_rules=product_literals_rule_set,
         base_threshold=int(_scalar(selection, "base_threshold", "selection", int, 100)),
         base_ratio=float(_scalar(selection, "base_ratio", "selection", float, 0.6)),
         depth=depth,

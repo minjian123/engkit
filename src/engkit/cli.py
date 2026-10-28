@@ -147,6 +147,7 @@ def _build_parser() -> argparse.ArgumentParser:
         ("env-example", "环境变量模板键位"),
         ("docs-status", "需求 / 任务 / 计划一致性"),
         ("boundary-metrics", "服务边界与跨库访问度量采集"),
+        ("product-literals", "产品字面量护栏（平台仓禁入面禁产品标识）"),
     )
     for name, text in base_named:
         action = base_actions.add_parser(name, parents=[common], help=text)
@@ -158,12 +159,15 @@ def _build_parser() -> argparse.ArgumentParser:
             "system-fields",
             "prototype-review",
             "env-example",
+            "product-literals",
         ):
             action.add_argument("--self-test", action="store_true", help="只跑内置判定向量")
-        if name in ("backend-base", "service-boundaries", "bare-collections"):
+        if name in ("backend-base", "service-boundaries", "bare-collections", "product-literals"):
             action.add_argument("--update-baseline", action="store_true", help="按当前扫描结果重写基线")
-        if name in ("service-boundaries", "bare-collections"):
+        if name in ("service-boundaries", "bare-collections", "product-literals"):
             action.add_argument("--json", action="store_true", help="以 JSON 输出结果")
+        if name == "product-literals":
+            action.add_argument("--baseline-ref", default="", help="基线只减不增断言的比较基准（缺省取配置）")
         if name == "bare-collections":
             action.add_argument("--report", action="store_true", help="只打印统计报告")
         if name == "prototype-review":
@@ -676,6 +680,16 @@ def _cmd_base(args: argparse.Namespace) -> int:
         from .base import env_example
 
         return env_example.run(cfg, as_self_test=bool(args.self_test))
+    if name == "product-literals":
+        from .base import product_literals
+
+        return product_literals.run(
+            cfg,
+            json_output=bool(args.json),
+            update_baseline=bool(args.update_baseline),
+            baseline_ref=str(args.baseline_ref),
+            as_self_test=bool(args.self_test),
+        )
     from .base import docs_status
 
     return docs_status.run(cfg, stage=str(args.stage), all_stages=bool(args.all), strict=bool(args.strict))

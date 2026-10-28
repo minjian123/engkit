@@ -57,6 +57,23 @@ def ref_exists(root: Path, ref: str) -> bool:
     return result is not None and result.returncode == 0
 
 
+def read_at(root: Path, ref: str, rel: str) -> str | None:
+    """读取某个 git 引用下的文件内容（基线只减不增断言用）。
+
+    Args:
+        root: 仓库根目录。
+        ref: 引用名（分支 / 提交号）。
+        rel: 相对仓库根的文件路径。
+
+    Returns:
+        str | None: 文件内容；引用或文件不可解析时返回 None。
+    """
+    result = _run(root, ["show", f"{ref}:{rel}"])
+    if result is None or result.returncode != 0:
+        return None
+    return result.stdout
+
+
 def changes(root: Path, since: str = "") -> tuple[list[str], bool]:
     """取本次改动路径（相对仓库根）并报告「是否可判定」。
 

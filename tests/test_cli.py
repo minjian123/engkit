@@ -299,3 +299,18 @@ def test_selection_depth_option(repo: Path, monkeypatch) -> None:
     monkeypatch.setattr(cli.selection, "build_selection", fake)
     assert cli.main(["selection", "--root", str(repo), "--depth", "direct", "--changed-file", "a.py"]) == 0
     assert seen["depth"] == "direct"
+
+
+def test_base_product_literals_cli(repo: Path, capsys) -> None:
+    """`base product-literals` 走 CLI 分派：命中退 1，自检退 0。"""
+    toml = repo / "engkit.toml"
+    toml.write_text(
+        toml.read_text(encoding="utf-8")
+        + '\n[rules.product_literals]\ndeny_globs = ["backend/**/*.py"]\nliterals = ["alpha"]\n',
+        encoding="utf-8",
+    )
+    target = repo / "backend/services/svc/src/svc/tag.py"
+    target.write_text('X = "alpha"\n', encoding="utf-8")
+    assert cli.main(["base", "product-literals", "--root", str(repo)]) == 1
+    assert "check_product_literals" in capsys.readouterr().out
+    assert cli.main(["base", "product-literals", "--root", str(repo), "--self-test"]) == 0
