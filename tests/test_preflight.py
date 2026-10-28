@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from engkit import preflight
+from engkit import guard, preflight
 
 _PY = f'"{sys.executable}"'
 """解释器命令（带引号，避免 Windows 路径被 shlex 拆分）。"""
@@ -469,8 +469,13 @@ def test_self_test_failure(build_repo) -> None:
 
 
 def test_run_preflight_blocked(monkeypatch, cfg) -> None:
-    """未包装即拦截（命令零执行）。"""
-    monkeypatch.delenv("CI")
+    """未包装即拦截（命令零执行）。
+
+    `is_ci()` 按 `CI_ENVS` 整张表判定（`GITLAB_CI` / `CI_JOB_ID` 等），只删 `CI` 在真实 CI 里仍判为
+    CI 环境，故逐个清空——否则本用例只在本机能过、CI 必挂（2026-10-28 #1278 实测）。
+    """
+    for name in guard.CI_ENVS:
+        monkeypatch.delenv(name, raising=False)
     assert preflight.run_preflight(cfg, mode="fast", jobs="off", no_cov=False, no_scope=False) == 1
 
 
