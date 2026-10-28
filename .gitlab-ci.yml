@@ -29,9 +29,10 @@ variables:
 
 .setup: &setup
   # pyright 经 pyright-python 拉 node 运行，`python:3.14-slim` 缺 `libatomic.so.1` 会导致 node 启动失败
-  # （2026-10-28 实测：`libatomic.so.1: cannot open shared object file`，exit 127）；apt 走清华镜像
+  # （2026-10-28 实测：`libatomic.so.1: cannot open shared object file`，exit 127）；git 是 eol / gitutil /
+  # runonce / selection 等用例与行尾检查的前提（2026-10-28 实测缺 git 时 15 failed + 25 errors）。apt 走清华镜像
   - sed -i 's|deb.debian.org|mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.list.d/debian.sources
-  - apt-get update && apt-get install -y --no-install-recommends libatomic1
+  - apt-get update && apt-get install -y --no-install-recommends git libatomic1
   - pip install --no-cache-dir uv
   - uv sync --frozen
 
@@ -49,5 +50,7 @@ self-host-smoke:
   stage: test
   script:
     - *setup
-    - uv run engkit preflight --fast --jobs off
+    # pyright 首次运行要现装 node（约 30MB），300s 单步预算不够（2026-10-28 #1278 实测超时中止）；
+    # 自举烟雾放宽单步 / 总体预算，只在 CI 侧放，不改引擎默认值
+    - uv run engkit preflight --fast --jobs off --step-seconds 900 --budget-seconds 1200
   needs: []
