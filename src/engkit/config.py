@@ -93,11 +93,13 @@ class FrontendConfig:
         root: 前端根（相对仓根）。
         groups: 工程分组目录。
         workspace_protocol: 工作区依赖协议前缀。
+        test_cmd: 单包测试命令模板（`{package}` 替换为包名）。
     """
 
     root: str
     groups: tuple[str, ...] = ("packages", "apps", "modules")
     workspace_protocol: str = "workspace:"
+    test_cmd: str = "pnpm --filter {package} test"
 
 
 @dataclass(frozen=True)
@@ -724,6 +726,9 @@ class Config:
         metrics_rules: 边界度量规则（未登记为 None）。
         base_threshold: 基础模块绝对阈值。
         base_ratio: 基础模块占比阈值。
+        depth: 选测依赖深度（`closure` 传递闭包 / `direct` 直接依赖）。
+        ruff_cmd: ruff 执行器前缀（开发环只查改动文件；空串表示跳过）。
+        ruff_config: ruff 配置路径（相对仓根；空串不传 `--config`）。
         backend_global: 后端全局变更规则。
         backend_extra: 后端特殊路径规则。
         frontend_global: 前端全局变更规则。
@@ -754,6 +759,9 @@ class Config:
     metrics_rules: MetricsRules | None = None
     base_threshold: int = 100
     base_ratio: float = 0.6
+    depth: str = "closure"
+    ruff_cmd: str = ""
+    ruff_config: str = ""
     backend_global: GlobalRule = field(default_factory=GlobalRule)
     backend_extra: tuple[ExtraTests, ...] = ()
     frontend_global: GlobalRule = field(default_factory=GlobalRule)
@@ -1690,15 +1698,19 @@ def parse(raw: dict[str, Any], path: Path) -> Config:
     frontend: FrontendConfig | None = None
     if "frontend" in raw:
         frontend_table = _table(raw, "frontend", "frontend")
-        _check_keys(frontend_table, ("root", "groups", "workspace_protocol"), "frontend")
+        _check_keys(frontend_table, ("root", "groups", "workspace_protocol", "test_cmd"), "frontend")
         frontend = FrontendConfig(
             root=_string(frontend_table, "root", "frontend"),
             groups=_strings(frontend_table, "groups", "frontend", ("packages", "apps", "modules")),
             workspace_protocol=_string(frontend_table, "workspace_protocol", "frontend", "workspace:"),
+            test_cmd=_string(frontend_table, "test_cmd", "frontend", "pnpm --filter {package} test"),
         )
 
     selection = _table(raw, "selection", "selection")
-    _check_keys(selection, ("base_threshold", "base_ratio"), "selection")
+    _check_keys(selection, ("base_threshold", "base_ratio", "depth", "ruff_cmd", "ruff_config"), "selection")
+    depth = _string(selection, "depth", "selection", "closure")
+    if depth not in ("closure", "direct"):
+        raise ConfigError(f"`selection.depth` 取值非法：{depth!r}（可选 closure / direct）")
 
     backend_global = GlobalRule()
     backend_extra: tuple[ExtraTests, ...] = ()
@@ -1877,6 +1889,9 @@ def parse(raw: dict[str, Any], path: Path) -> Config:
         metrics_rules=metrics_rule_set,
         base_threshold=int(_scalar(selection, "base_threshold", "selection", int, 100)),
         base_ratio=float(_scalar(selection, "base_ratio", "selection", float, 0.6)),
+        depth=depth,
+        ruff_cmd=_string(selection, "ruff_cmd", "selection", ""),
+        ruff_config=_string(selection, "ruff_config", "selection", ""),
         backend_global=backend_global,
         backend_extra=backend_extra,
         frontend_global=frontend_global,

@@ -254,3 +254,48 @@ def test_version(capsys) -> None:
     with pytest.raises(SystemExit):
         cli.main(["--version"])
     assert cli.VERSION in capsys.readouterr().out
+
+
+def test_run_changed_dispatch(repo: Path, monkeypatch) -> None:
+    """`run-changed` 转发参数（含并行档、超时与开关）。"""
+    seen: dict[str, object] = {}
+
+    def fake(cfg, **kwargs):
+        seen.update(kwargs)
+        return 0
+
+    monkeypatch.setattr(cli.devloop, "run_changed", fake)
+    code = cli.main(
+        [
+            "run-changed",
+            "--root",
+            str(repo),
+            "--changed-file",
+            "a.py",
+            "--jobs",
+            "2",
+            "--timeout",
+            "5",
+            "--no-lint",
+            "--no-frontend",
+        ]
+    )
+    assert code == 0
+    assert seen["changed_files"] == ("a.py",)
+    assert seen["jobs"] == "2"
+    assert seen["timeout"] == 5.0
+    assert seen["lint"] is False
+    assert seen["frontend"] is False
+
+
+def test_selection_depth_option(repo: Path, monkeypatch) -> None:
+    """`selection --depth` 透传给选测。"""
+    seen: dict[str, object] = {}
+
+    def fake(cfg, changed, **kwargs):
+        seen.update(kwargs)
+        return cli.selection.Selection()
+
+    monkeypatch.setattr(cli.selection, "build_selection", fake)
+    assert cli.main(["selection", "--root", str(repo), "--depth", "direct", "--changed-file", "a.py"]) == 0
+    assert seen["depth"] == "direct"

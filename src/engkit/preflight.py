@@ -514,6 +514,7 @@ def run_selected(
     pytest_cwd: str = "",
     pytest_args: tuple[str, ...] = (),
     report_path: str = "",
+    depth: str = "",
 ) -> int:
     """推导 → 跑 pytest → 覆盖率判定 → 扩圈 → 退化 → 度量。
 
@@ -533,6 +534,7 @@ def run_selected(
         pytest_cwd: 工作目录（相对仓根；缺省取配置）。
         pytest_args: 透传 pytest 参数。
         report_path: 覆盖率报告落点（相对仓根；缺省 `<数据文件>.json`）。
+        depth: 依赖深度（空串取配置；预检固定传 `closure`）。
 
     Returns:
         int: pytest 退出码 / 覆盖率或推导异常 1 / 超时 124。
@@ -557,7 +559,7 @@ def run_selected(
             changed = []
             force_full = True
     try:
-        result = selection.build_selection(cfg, changed, force_full=force_full)
+        result = selection.build_selection(cfg, changed, force_full=force_full, depth=depth)
     except RuntimeError as error:
         print(f"[test-selection] {error}", file=sys.stderr)
         return 1
@@ -670,7 +672,7 @@ def _run_scoped_step(
     """
     section("定向：按 git 变更推导受影响范围")
     try:
-        preview = selection.build_selection(cfg, changes)
+        preview = selection.build_selection(cfg, changes, depth="closure")
     except RuntimeError as error:
         failures.append(str(error))
         note(f"失败（{error}）")
@@ -692,7 +694,7 @@ def _run_scoped_step(
     sink: list[str] = []
     out("\n[engkit] 后端测试：定向（选测 + 覆盖率门禁 + 扩圈）")
     with contextlib.redirect_stdout(Tee(sys.stdout, sink)):
-        code = run_selected(cfg, changed=changes, jobs=jobs, cov=not no_cov, timeout=limit)
+        code = run_selected(cfg, changed=changes, jobs=jobs, cov=not no_cov, timeout=limit, depth="closure")
     summary = metrics_summary(sink)
     if summary:
         out(f"[engkit] 选测度量：{summary}")

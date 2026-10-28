@@ -85,3 +85,13 @@ def test_frontend_not_configured(cfg) -> None:
     """未配置前端时返回空结果。"""
     result = selection.build_frontend_selection(dataclasses.replace(cfg, frontend=None), ["frontend/x.ts"])
     assert result.packages == () and result.degraded is False
+
+
+def test_frontend_direct_skips_global_degrade(cfg) -> None:
+    """直接依赖深度：根级配置 / 未归属文件变更不退化全部包，只留提示。"""
+    result = selection.build_frontend_selection(cfg, ["package.json"], depth="direct")
+    assert result.packages == ()
+    assert result.degraded is False
+    assert any("推送前预检" in item for item in result.notes)
+    forced = selection.build_frontend_selection(cfg, [], force_full=True, depth="direct")
+    assert forced.packages == () and forced.degraded is False

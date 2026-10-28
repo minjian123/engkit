@@ -122,7 +122,7 @@ class Graph:
     Attributes:
         projects: 工程清单。
         test_files: 工程名 → 测试文件（相对后端根）。
-        test_deps: 测试文件 → 依赖闭包。
+        test_deps: 测试文件 → 依赖集合（深度由选测模式决定：闭包或直接依赖）。
     """
 
     projects: tuple[Project, ...]
@@ -318,11 +318,54 @@ def _transitive_deps(modules: dict[str, set[str]]) -> dict[str, set[str]]:
     return resolved
 
 
-def build_graph(cfg: Config) -> Graph:
-    """构建后端导入图（源模块依赖 + 测试依赖闭包）。
+def _conftest_direct(backend: Path, project: Project) -> dict[str, set[str]]:
+    """收集工程测试目录内各 `conftest.py` 的直接导入（目录 → 导入集合）。
+
+    Args:
+        backend: 后端根。
+        project: 工程。
+
+    Returns:
+        dict[str, set[str]]: 测试目录（相对测试根；根目录为 `.`）→ 直接导入模块集合。
+    """
+    found: dict[str, set[str]] = {}
+    test_root = backend / project.tests
+    for path in _iter_py(test_root):
+        if path.name != "conftest.py":
+            continue
+        rel_dir = path.parent.relative_to(test_root).as_posix()
+        found.setdefault(rel_dir, set()).update(parse_imports(path, ""))
+    return found
+
+
+def _conftest_scope(rel: str, project: Project, conftest: dict[str, set[str]]) -> set[str]:
+    """取测试文件所在目录及其上级目录的 conftest 直接导入（不含测试根之上）。
+
+    Args:
+        rel: 测试文件（相对后端根）。
+        project: 工程。
+        conftest: 工程内 conftest 直接导入（`_conftest_direct` 结果）。
+
+    Returns:
+        set[str]: 覆盖该测试文件的 conftest 直接导入集合。
+    """
+    prefix = f"{project.tests}/"
+    if not rel.startswith(prefix):
+        return set()
+    parts = rel[len(prefix) :].split("/")[:-1]
+    dirs = ["."] + ["/".join(parts[: index + 1]) for index in range(len(parts))]
+    found: set[str] = set()
+    for item in dirs:
+        found.update(conftest.get(item, set()))
+    return found
+
+
+def build_graph(cfg: Config, *, depth: str = "") -> Graph:
+    """构建后端导入图（源模块依赖 + 测试依赖）。
 
     Args:
         cfg: 仓配置。
+        depth: 依赖深度（`closure` 传递闭包 / `direct` 直接依赖；空串取配置）。
 
     Returns:
         Graph: 导入图。
@@ -330,6 +373,7 @@ def build_graph(cfg: Config) -> Graph:
     Raises:
         RuntimeError: 未配置后端，或未发现任何工程。
     """
+    mode = depth or cfg.depth
     backend, root, test_prefix, _ = _backend_meta(cfg)
     projects = discover_projects(cfg)
     if not projects:
@@ -349,23 +393,30 @@ def build_graph(cfg: Config) -> Graph:
             module = module_of_source(path.relative_to(root).as_posix(), project)
             if module:
                 modules[module] = parse_imports(path, module)
-    closures = _transitive_deps(modules)
+    closures = _transitive_deps(modules) if mode == "closure" else {}
+
+    conftest: dict[str, dict[str, set[str]]] = {}
+    if mode == "direct":
+        for project in projects:
+            conftest[project.name] = _conftest_direct(backend, project)
 
     test_deps: dict[str, frozenset[str]] = {}
     for project in projects:
         for rel in test_files[project.name]:
-            closure: set[str] = set()
-            for dep in parse_imports(backend / rel, ""):
-                if dep in modules:
-                    closure.add(dep)
+            direct: set[str] = {dep for dep in parse_imports(backend / rel, "") if dep in modules}
+            closure: set[str] = set(direct)
+            if mode == "closure":
+                for dep in direct:
                     closure.update(closures.get(dep, set()))
+            else:
+                closure.update(dep for dep in _conftest_scope(rel, project, conftest[project.name]) if dep in modules)
             test_deps[rel] = frozenset(closure)
 
     return Graph(projects=tuple(projects), test_files=test_files, test_deps=test_deps)
 
 
 def _isomorphic_candidates(backend: Path, rel: str, project: Project, test_prefix: str) -> tuple[str, ...]:
-    """目录同构候选：源包目录 ↔ 同构测试目录下的全部测试文件。
+    """目录同构候选：同名测试优先（`test_<原名>.py` / `test_<原名>_*.py`），无命中退回同构目录。
 
     Args:
         backend: 后端根。
@@ -379,11 +430,23 @@ def _isomorphic_candidates(backend: Path, rel: str, project: Project, test_prefi
     prefix = f"{project.src}/"
     if not rel.startswith(prefix) or not rel.endswith(".py"):
         return ()
+    test_root = backend / project.tests
+    stem = Path(rel).stem
+    if stem != "__init__":
+        exact = f"{test_prefix}{stem}.py"
+        related = f"{test_prefix}{stem}_"
+        same = [
+            path.relative_to(backend).as_posix()
+            for path in _iter_py(test_root)
+            if _is_test_file(path, test_prefix) and (path.name == exact or path.name.startswith(related))
+        ]
+        if same:
+            return tuple(sorted(same))
     parts = rel[len(prefix) : -3].split("/")
     sub = parts[1:-1]
-    test_dir = backend / project.tests
+    test_dir = test_root
     if sub:
-        test_dir = test_dir.joinpath(*sub)
+        test_dir = test_root.joinpath(*sub)
     if not test_dir.is_dir():
         return ()
     pattern = "**/*.py" if sub else "*.py"
@@ -563,6 +626,7 @@ def build_selection(
     base_threshold: int | None = None,
     base_ratio: float | None = None,
     force_full: bool = False,
+    depth: str = "",
 ) -> Selection:
     """按变更路径推导后端选测结果。
 
@@ -572,6 +636,7 @@ def build_selection(
         base_threshold: 基础模块绝对阈值（缺省取配置）。
         base_ratio: 基础模块占比阈值（缺省取配置）。
         force_full: 强制退化全量。
+        depth: 依赖深度（`closure` 传递闭包 / `direct` 直接依赖；空串取配置）。
 
     Returns:
         Selection: 选测结果。
@@ -580,9 +645,10 @@ def build_selection(
         RuntimeError: 未配置后端或未发现工程。
     """
     backend, _, test_prefix, _ = _backend_meta(cfg)
+    mode = depth or cfg.depth
     threshold = cfg.base_threshold if base_threshold is None else base_threshold
     ratio_limit = cfg.base_ratio if base_ratio is None else base_ratio
-    graph = build_graph(cfg)
+    graph = build_graph(cfg, depth=mode)
     changed_set = {rel for rel in (gitutil.norm(item) for item in changed) if rel}
     backend_prefix = cfg.backend.root if cfg.backend is not None else ""
 
@@ -599,10 +665,22 @@ def build_selection(
         reasons.append("变更基准不可解析 ⇒ 强制退化全量")
 
     selected_by_project: dict[str, set[str]] = {}
+    global_modules = (
+        {
+            module
+            for rel in changed_set
+            for module in (module_of_source(rel, project) for project in graph.projects)
+            if module
+        }
+        if mode == "direct"
+        else set()
+    )
     for project in graph.projects:
         files = graph.test_files[project.name]
         total = len(files)
-        modules = {module for rel in changed_set for module in [module_of_source(rel, project)] if module}
+        modules = global_modules or {
+            module for rel in changed_set for module in [module_of_source(rel, project)] if module
+        }
         selected: set[str] = {rel for rel in files if f"{backend_prefix}/{rel}" in changed_set}
         if global_change:
             selected.update(files)
@@ -621,9 +699,12 @@ def build_selection(
                         selected.add(test_rel)
             project_degraded = False
             if modules and not selected:
-                project_degraded = True
-                notes.append(f"{project.name}：变更模块无测试引用者 ⇒ 退化工程级全量")
-            if len(selected) > threshold or (total and len(selected) / total > ratio_limit):
+                if mode == "direct":
+                    notes.append(f"{project.name}：变更模块无测试命中 ⇒ 本次跳过该工程（缺测交推送前预检）")
+                else:
+                    project_degraded = True
+                    notes.append(f"{project.name}：变更模块无测试引用者 ⇒ 退化工程级全量")
+            if mode != "direct" and (len(selected) > threshold or (total and len(selected) / total > ratio_limit)):
                 project_degraded = True
                 notes.append(
                     f"{project.name}：受影响测试 {len(selected)}/{total} 超过基础模块阈值"
@@ -754,19 +835,23 @@ def discover_frontend_packages(cfg: Config) -> list[FrontendPackage]:
     return packages
 
 
-def build_frontend_selection(cfg: Config, changed: list[str], *, force_full: bool = False) -> FrontendSelection:
+def build_frontend_selection(
+    cfg: Config, changed: list[str], *, force_full: bool = False, depth: str = ""
+) -> FrontendSelection:
     """按变更路径推导受影响前端包（依赖反向闭包 + 根级配置退化）。
 
     Args:
         cfg: 仓配置。
         changed: 变更路径（相对仓库根）。
         force_full: 强制退化为全部包。
+        depth: 依赖深度（`closure` 根级配置退化为全部包 / `direct` 只取直接命中包；空串取配置）。
 
     Returns:
         FrontendSelection: 前端选测结果。
     """
     if cfg.frontend is None:
         return FrontendSelection()
+    mode = depth or cfg.depth
     packages = discover_frontend_packages(cfg)
     names = [package.name for package in packages]
     frontend_prefix = f"{cfg.frontend.root}/"
@@ -793,7 +878,7 @@ def build_frontend_selection(cfg: Config, changed: list[str], *, force_full: boo
         if not matched:
             global_change = True
 
-    if global_change:
+    if global_change and mode != "direct":
         affected = set(names)
         reason = (
             "变更基准不可解析 ⇒ 强制退化全部前端包"
@@ -813,12 +898,14 @@ def build_frontend_selection(cfg: Config, changed: list[str], *, force_full: boo
                     affected.add(package.name)
                     grew = True
         reason = ""
+        if global_change:
+            notes.append("根级配置 / 共享脚本 / 未归属文件变更 ⇒ 前端全量留推送前预检")
         if direct:
             notes.append(f"{'、'.join(sorted(direct))} 变更 ⇒ 依赖反向闭包 {len(affected)} 个包")
 
     return FrontendSelection(
         packages=tuple(name for name in names if name in affected),
-        degraded=global_change,
+        degraded=global_change and mode != "direct",
         reason=reason,
         notes=tuple(notes),
     )

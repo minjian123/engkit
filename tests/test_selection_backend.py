@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 from engkit import selection
-from engkit.config import load
+from engkit.config import ConfigError, load
 
 
 def _selection(cfg, changed: list[str], **kwargs):
@@ -96,11 +96,11 @@ def test_parse_imports_relative_edge(repo: Path) -> None:
 
 
 def test_isomorphic_candidates(repo: Path, cfg) -> None:
-    """目录同构：子目录、包根文件与无同构目录。"""
+    """同构候选：同名测试优先，无同名退回同构目录，都没有则为空。"""
     project = selection.discover_projects(cfg)[0]
     backend = repo / "backend"
     assert selection._isomorphic_candidates(backend, "backend/libs/pkg_a/src/pkg_a/core.py", project, "test_") == (
-        "libs/pkg_a/tests/test_root.py",
+        "libs/pkg_a/tests/core/test_core.py",
     )
     (repo / "backend/libs/pkg_a/tests/core").mkdir(parents=True, exist_ok=True)
     assert "libs/pkg_a/tests/core/test_core.py" in selection._isomorphic_candidates(
@@ -108,6 +108,21 @@ def test_isomorphic_candidates(repo: Path, cfg) -> None:
     )
     assert selection._isomorphic_candidates(backend, "backend/libs/pkg_a/src/pkg_a/zzz/x.py", project, "test_") == ()
     assert selection._isomorphic_candidates(backend, "backend/libs/pkg_a/src/pkg_a/x.txt", project, "test_") == ()
+
+
+def test_isomorphic_same_name_prefix(repo: Path, cfg) -> None:
+    """同名前缀变体（`test_<原名>_*.py`）一并命中，且只在本工程内。"""
+    project = selection.discover_projects(cfg)[0]
+    backend = repo / "backend"
+    extra = repo / "backend/libs/pkg_a/tests/core/test_collections_chain.py"
+    extra.write_text("def test_x():\n    assert True\n", encoding="utf-8")
+    other = repo / "backend/services/svc/tests/test_collections_chain.py"
+    other.write_text("def test_x():\n    assert True\n", encoding="utf-8")
+    found = selection._isomorphic_candidates(
+        backend, "backend/libs/pkg_a/src/pkg_a/core/collections.py", project, "test_"
+    )
+    assert "libs/pkg_a/tests/core/test_collections_chain.py" in found
+    assert "services/svc/tests/test_collections_chain.py" not in found
 
 
 def test_selection_transitive_import(cfg) -> None:
@@ -269,3 +284,63 @@ def test_select_with_none_backend(cfg) -> None:
     """未配置后端时 `unregistered_projects` 返回空。"""
     patched = dataclasses.replace(cfg, backend=None)
     assert selection.unregistered_projects([], patched) == []
+
+
+def test_direct_depth_skips_transitive_closure(cfg) -> None:
+    """直接依赖深度：不再沿 import 链扩散（改 util 不命中只引用 core 的用例）。"""
+    target = "backend/libs/pkg_a/src/pkg_a/util.py"
+    assert "libs/pkg_a/tests/core/test_core.py" in _selection(cfg, [target]).test_paths
+    direct = _selection(cfg, [target], depth="direct")
+    assert "libs/pkg_a/tests/core/test_core.py" not in direct.test_paths
+    assert direct.degraded is False
+
+
+def test_direct_depth_uses_conftest_imports(repo: Path, cfg) -> None:
+    """直接依赖深度：conftest 的直接 import 计入所覆盖测试的依赖。"""
+    conftest = repo / "backend/libs/pkg_a/tests/conftest.py"
+    conftest.write_text("from pkg_a.util import helper\n\n__all__ = ['helper']\n", encoding="utf-8")
+    direct = _selection(cfg, ["backend/libs/pkg_a/src/pkg_a/util.py"], depth="direct")
+    assert "libs/pkg_a/tests/core/test_core.py" in direct.test_paths
+
+
+def test_conftest_scope_outside_project(cfg) -> None:
+    """不在工程测试根下的路径不纳入任何 conftest 依赖。"""
+    project = selection.discover_projects(cfg)[0]
+    assert selection._conftest_scope("services/svc/tests/test_app.py", project, {}) == set()
+
+
+def test_direct_depth_keeps_global_degrade(cfg) -> None:
+    """直接依赖深度：全局配置 / 迁移 / 部署变更仍退化全量。"""
+    result = _selection(cfg, ["backend/pyproject.toml"], depth="direct")
+    assert result.degraded is True
+    assert result.picked == result.total
+
+
+def test_direct_depth_no_threshold_degrade(cfg) -> None:
+    """直接依赖深度：不因受影响测试数超阈值而退化工程级全量。"""
+    changed = ["backend/libs/pkg_a/src/pkg_a/util.py"]
+    assert _selection(cfg, changed, base_threshold=1).degraded is True
+    direct = _selection(cfg, changed, base_threshold=1, depth="direct")
+    assert direct.degraded is False
+    assert not any("超过基础模块阈值" in item for item in direct.notes)
+
+
+def test_direct_depth_no_hit_note(repo: Path, cfg) -> None:
+    """直接依赖深度：变更模块无测试命中时只说明、不退化。"""
+    orphan = repo / "backend/libs/pkg_a/src/pkg_a/db/orphan.py"
+    orphan.parent.mkdir(parents=True, exist_ok=True)
+    orphan.write_text("X = 1\n", encoding="utf-8")
+    result = _selection(cfg, ["backend/libs/pkg_a/src/pkg_a/db/orphan.py"], depth="direct")
+    assert result.degraded is False
+    assert any("无测试命中" in item for item in result.notes)
+
+
+def test_config_depth(cfg, build_repo) -> None:
+    """`[selection] depth` 解析与取值校验。"""
+    assert cfg.depth == "closure"
+    config = '[docs]\nroot = "docs"\n[selection]\ndepth = "direct"\n'
+    root = build_repo(config=config)
+    assert load(root / "engkit.toml").depth == "direct"
+    bad = build_repo(config=config.replace('"direct"', '"deep"'))
+    with pytest.raises(ConfigError, match=r"selection\.depth"):
+        load(bad / "engkit.toml")

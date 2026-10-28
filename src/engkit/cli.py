@@ -1,7 +1,7 @@
 """命令行入口：`engkit <子命令>`。
 
-子命令：`links` / `docs-scope` / `selection` / `run-selected` / `coverage` / `preflight` /
-`run-once` / `guard` / `kiwi`。各仓的既有入口脚本只做转发，参数与退出码保持不变。
+子命令：`links` / `docs-scope` / `selection` / `run-selected` / `run-changed` / `coverage` /
+`preflight` / `run-once` / `guard` / `kiwi`。各仓的既有入口脚本只做转发，参数与退出码保持不变。
 """
 
 from __future__ import annotations
@@ -11,7 +11,7 @@ import json
 import sys
 from pathlib import Path
 
-from . import coverage, docs_links, docs_scope, eol, gitutil, guard, kiwi, preflight, runonce, selection
+from . import coverage, devloop, docs_links, docs_scope, eol, gitutil, guard, kiwi, preflight, runonce, selection
 from .config import CONFIG_NAME, Config, ConfigError, load_for
 from .console import configure_stdio, error, out
 
@@ -53,6 +53,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     choose.add_argument("--base-threshold", type=int, default=None, help="基础模块绝对阈值")
     choose.add_argument("--base-ratio", type=float, default=None, help="基础模块占比阈值")
+    choose.add_argument("--depth", default="", choices=("", "closure", "direct"), help="依赖深度（空串取配置）")
 
     selected = subparsers.add_parser("run-selected", parents=[common], help="定向执行器（选测 + 覆盖率 + 扩圈）")
     selected.add_argument("--changed-from", default="", help="对比基准")
@@ -69,6 +70,16 @@ def _build_parser() -> argparse.ArgumentParser:
     selected.add_argument("--max-rounds", type=int, default=None, help="扩圈轮次上限（缺省取配置）")
     selected.add_argument("--cov-json", default="", help="覆盖率报告落点")
     selected.add_argument("--timeout", type=float, default=0.0, help="单轮超时（秒；0 不设限）")
+    selected.add_argument("--depth", default="", choices=("", "closure", "direct"), help="依赖深度（空串取配置）")
+
+    changed = subparsers.add_parser("run-changed", parents=[common], help="开发环：只跑改动相关内容")
+    changed.add_argument("--changed-from", default="", help="对比基准（缺省取配置）")
+    changed.add_argument("--changed-file", action="append", default=[], help="显式变更文件（可重复）")
+    changed.add_argument("--changed-file-list", default="", help="变更清单文件")
+    changed.add_argument("--jobs", default=preflight.DEFAULT_JOBS, help="并行档位：auto / 正整数 / off")
+    changed.add_argument("--timeout", type=float, default=0.0, help="后端单轮超时（秒；0 不设限）")
+    changed.add_argument("--no-lint", action="store_true", help="跳过改动文件 ruff")
+    changed.add_argument("--no-frontend", action="store_true", help="跳过前端受影响包")
 
     gate = subparsers.add_parser("coverage", parents=[common], help="覆盖率门禁（合并并行采集数据）")
     gate.add_argument("--data-file", required=True, help="覆盖率数据文件基址")
@@ -317,7 +328,7 @@ def _cmd_selection(args: argparse.Namespace) -> int:
         out(" ".join(services))
         return 0
     if args.scope == "frontend":
-        result = selection.build_frontend_selection(cfg, changed, force_full=args.force_full)
+        result = selection.build_frontend_selection(cfg, changed, force_full=args.force_full, depth=args.depth)
         out(_format_frontend(result, args.format))
         return 0
     try:
@@ -327,6 +338,7 @@ def _cmd_selection(args: argparse.Namespace) -> int:
             base_threshold=args.base_threshold,
             base_ratio=args.base_ratio,
             force_full=args.force_full,
+            depth=args.depth,
         )
     except RuntimeError as exc:
         error(f"[test-selection] {exc}")
@@ -413,6 +425,29 @@ def _cmd_run_selected(args: argparse.Namespace) -> int:
         pytest_cwd=args.pytest_cwd,
         pytest_args=tuple(args.pytest_arg),
         report_path=args.cov_json,
+        depth=args.depth,
+    )
+
+
+def _cmd_run_changed(args: argparse.Namespace) -> int:
+    """执行开发环（只跑改动相关内容）。
+
+    Args:
+        args: 解析结果。
+
+    Returns:
+        int: 退出码。
+    """
+    cfg = _load(args)
+    return devloop.run_changed(
+        cfg,
+        changed_from=args.changed_from,
+        changed_files=tuple(args.changed_file),
+        changed_file_list=args.changed_file_list,
+        jobs=args.jobs,
+        timeout=args.timeout,
+        lint=not args.no_lint,
+        frontend=not args.no_frontend,
     )
 
 
@@ -652,6 +687,7 @@ _HANDLERS = {
     "docs-scope": _cmd_docs_scope,
     "selection": _cmd_selection,
     "run-selected": _cmd_run_selected,
+    "run-changed": _cmd_run_changed,
     "coverage": _cmd_coverage,
     "preflight": _cmd_preflight,
     "run-once": _cmd_run_once,
