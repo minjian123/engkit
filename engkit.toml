@@ -29,6 +29,13 @@ steps = [
   { label = "静态：pyright", cmd = ["uv", "run", "pyright", "--outputjson"] },
 ]
 
+# 推送入口（`uv run engkit push`）：预检是推送的内部步骤，本地不再有独立入口。
+# 档位按**待推提交**自动选：全为 doc_globs 命中的文档 → 快速档；含代码 → 定向档。
+[push]
+remote = "origin"
+branch = "main"
+doc_globs = ["*.md", "*.txt", "*.png", "*.jpg", "*.jpeg", "*.gif", "*.svg", "*.webp", "*.pdf"]
+
 [guard]
 scripts = []
 repo_dirs = ["src", "tests"]

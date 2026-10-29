@@ -44,11 +44,9 @@ def _gate(cfg, *, dirty_tree: bool = True, audit_file: str = ".cache/preflight/a
 
 
 def test_resolve_mode() -> None:
-    """无参即快速档；`--push` 定向档；`--full` 优先。"""
-    assert preflight.resolve_mode(push=False, full=False) == "fast"
-    assert preflight.resolve_mode(push=True, full=False) == "scoped"
-    assert preflight.resolve_mode(push=False, full=True) == "full"
-    assert preflight.resolve_mode(push=True, full=True) == "full"
+    """无参即快速档；`--full` 优先（定向档由推送入口按变更自动选择）。"""
+    assert preflight.resolve_mode(full=False) == "fast"
+    assert preflight.resolve_mode(full=True) == "full"
 
 
 def test_worktree_dirty(git_repo: Path) -> None:
@@ -85,7 +83,7 @@ def test_gate_disabled(git_repo: Path, cfg, monkeypatch: pytest.MonkeyPatch) -> 
     """仓配置关闭闸门：脏树也放行。"""
     _no_ci(monkeypatch)
     (git_repo / "new.txt").write_text("x", encoding="utf-8")
-    decision = preflight_gate.evaluate(_gate(cfg, dirty_tree=False), allow_dirty=False, mode="fast")
+    decision = preflight_gate.evaluate(_gate(cfg, dirty_tree=False))
     assert decision.blocked is False
     assert decision.entries == ()
 
@@ -94,61 +92,53 @@ def test_gate_skips_ci(git_repo: Path, cfg, monkeypatch: pytest.MonkeyPatch) -> 
     """CI 环境不设闸门（流水线里没有「开发中」）。"""
     monkeypatch.setenv("CI", "1")
     (git_repo / "new.txt").write_text("x", encoding="utf-8")
-    assert preflight_gate.evaluate(cfg, allow_dirty=False, mode="fast").blocked is False
+    assert preflight_gate.evaluate(cfg).blocked is False
 
 
 def test_gate_clean(git_repo: Path, cfg, monkeypatch: pytest.MonkeyPatch) -> None:
     """干净工作树放行。"""
     _no_ci(monkeypatch)
-    decision = preflight_gate.evaluate(cfg, allow_dirty=False, mode="fast")
+    decision = preflight_gate.evaluate(cfg)
     assert decision.blocked is False
     assert decision.entries == ()
     assert decision.reliable is True
 
 
 def test_gate_rejects_dirty(git_repo: Path, cfg, monkeypatch: pytest.MonkeyPatch) -> None:
-    """脏工作树拒绝，提示指向开发环与显式开关。"""
+    """脏工作树拒绝，提示指向开发环与推送入口。"""
     _no_ci(monkeypatch)
     (git_repo / "new.txt").write_text("x", encoding="utf-8")
-    decision = preflight_gate.evaluate(cfg, allow_dirty=False, mode="fast")
+    decision = preflight_gate.evaluate(cfg)
     assert decision.blocked is True
     assert decision.entries == ("new.txt",)
+    assert decision.reason == preflight_gate.REASON_DIRTY
     text = preflight_gate.guidance(decision)
-    assert "推送前门禁" in text
+    assert "推送的内部步骤" in text
     assert "run-changed" in text
-    assert "--allow-dirty" in text
-
-
-def test_gate_bypass(git_repo: Path, cfg, monkeypatch: pytest.MonkeyPatch) -> None:
-    """显式声明后放行并标注绕过。"""
-    _no_ci(monkeypatch)
-    (git_repo / "new.txt").write_text("x", encoding="utf-8")
-    decision = preflight_gate.evaluate(cfg, allow_dirty=True, mode="fast")
-    assert decision.blocked is False
-    assert decision.bypassed is True
-    assert decision.entries == ("new.txt",)
-
-
-def test_gate_allow_dirty_rejects_scoped(git_repo: Path, cfg, monkeypatch: pytest.MonkeyPatch) -> None:
-    """`--allow-dirty` 只对快速档开放：定向档 / 全量档仍拒绝。"""
-    _no_ci(monkeypatch)
-    (git_repo / "new.txt").write_text("x", encoding="utf-8")
-    for mode in ("scoped", "full"):
-        decision = preflight_gate.evaluate(cfg, allow_dirty=True, mode=mode)
-        assert decision.blocked is True
-        assert decision.bypassed is False
-        assert decision.reason == preflight_gate.REASON_ALLOW_DIRTY_SCOPED
-    text = preflight_gate.guidance(decision)
-    assert "只对快速档开放" in text
+    assert "engkit push" in text
 
 
 def test_gate_unreliable(monkeypatch: pytest.MonkeyPatch, cfg) -> None:
     """git 不可判定时放行（宁放过不误拦）。"""
     _no_ci(monkeypatch)
     monkeypatch.setattr(gitutil, "_run", lambda root, args: None)
-    decision = preflight_gate.evaluate(cfg, allow_dirty=False, mode="fast")
+    decision = preflight_gate.evaluate(cfg)
     assert decision.blocked is False
     assert decision.reliable is False
+
+
+def test_ahead_git_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    """rev-list / diff 失败：不可判定。"""
+    monkeypatch.setattr(gitutil, "ref_exists", lambda root, ref: True)
+    fake = subprocess.CompletedProcess([], returncode=128, stdout="", stderr="fatal")
+    monkeypatch.setattr(gitutil, "_run", lambda root, args: fake)
+    assert gitutil.ahead(Path("."), "origin", "main") == ([], [], False)
+
+
+def test_current_branch_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
+    """git 不可用：分支名为空串。"""
+    monkeypatch.setattr(gitutil, "_run", lambda root, args: None)
+    assert gitutil.current_branch(Path(".")) == ""
 
 
 def test_guidance_truncates() -> None:
@@ -167,28 +157,25 @@ def test_audit_path(git_repo: Path, cfg) -> None:
 
 
 def test_audit_write_events(git_repo: Path, cfg, monkeypatch: pytest.MonkeyPatch) -> None:
-    """三类事件各写一行：被拒 / 绕过 / 真跑。"""
+    """两类事件各写一行：被拒 / 真跑。"""
     _no_ci(monkeypatch)
-    decision = preflight_gate.Decision(blocked=False, entries=("a.py", "b.py"), bypassed=True)
+    clean = preflight_gate.Decision(blocked=False)
     refused = preflight_gate.Decision(blocked=True, entries=("a.py", "b.py"), reason=preflight_gate.REASON_DIRTY)
     preflight_gate.write(cfg, event=preflight_gate.EVENT_REJECTED, mode="fast", decision=refused)
-    preflight_gate.write(cfg, event=preflight_gate.EVENT_BYPASS, mode="scoped", decision=decision)
     preflight_gate.write(
         cfg,
         event=preflight_gate.EVENT_RUN,
         mode="fast",
-        decision=decision,
+        decision=clean,
         duration_seconds=1.234,
         exit_code=0,
     )
     lines = (git_repo / ".cache/preflight/audit.jsonl").read_text(encoding="utf-8").splitlines()
-    rejected, bypass, run = (json.loads(line) for line in lines)
+    rejected, run = (json.loads(line) for line in lines)
     assert rejected["event"] == "rejected"
     assert rejected["reason"] == preflight_gate.REASON_DIRTY
     assert rejected["fingerprint"] == ""
     assert rejected["dirty"] == 2
-    assert bypass["bypassed"] is True
-    assert bypass["mode"] == "scoped"
     assert run["exit_code"] == 0
     assert run["duration_seconds"] == 1.234
     assert run["fingerprint"] != ""
@@ -208,11 +195,12 @@ def test_audit_fail_open(git_repo: Path, cfg, monkeypatch: pytest.MonkeyPatch) -
 
 
 def test_preflight_rejects_dirty(git_repo: Path, cfg, monkeypatch: pytest.MonkeyPatch, capsys) -> None:
-    """脏树上预检零步骤执行并记审计。"""
+    """脏树上预检零步骤执行并记审计（经推送入口调用）。"""
     _no_ci(monkeypatch)
     monkeypatch.setenv("ENGKIT_RUN_ONCE", "1")
     (git_repo / "dirty.txt").write_text("x", encoding="utf-8")
-    assert preflight.run_preflight(cfg, mode="fast", jobs="off", no_cov=True, no_scope=True) == 1
+    code = preflight.run_preflight(cfg, mode="fast", jobs="off", no_cov=True, no_scope=True, from_push=True)
+    assert code == 1
     captured = capsys.readouterr()
     assert "预检闸门" in captured.err
     assert "静态：echo" not in captured.out
@@ -220,25 +208,12 @@ def test_preflight_rejects_dirty(git_repo: Path, cfg, monkeypatch: pytest.Monkey
     assert json.loads(lines[-1])["event"] == "rejected"
 
 
-def test_preflight_allow_dirty(git_repo: Path, cfg, monkeypatch: pytest.MonkeyPatch, capsys) -> None:
-    """显式声明后在脏树上执行，并留「绕过 + 真跑」两条审计。"""
+def test_preflight_runs_on_clean(git_repo: Path, cfg, monkeypatch: pytest.MonkeyPatch, capsys) -> None:
+    """干净树上经推送入口调用即真跑，并记一条 run 审计。"""
     _no_ci(monkeypatch)
     monkeypatch.setenv("ENGKIT_RUN_ONCE", "1")
-    (git_repo / "dirty.txt").write_text("x", encoding="utf-8")
-    code = preflight.run_preflight(cfg, mode="fast", jobs="off", no_cov=True, no_scope=True, allow_dirty=True)
+    code = preflight.run_preflight(cfg, mode="fast", jobs="off", no_cov=True, no_scope=True, from_push=True)
     assert code == 0
-    assert "allow-dirty" in capsys.readouterr().out
+    assert "静态：echo" in capsys.readouterr().out
     lines = (git_repo / ".cache/preflight/audit.jsonl").read_text(encoding="utf-8").splitlines()
-    assert [json.loads(line)["event"] for line in lines] == ["bypass", "run"]
-
-
-def test_preflight_allow_dirty_scoped_rejected(git_repo: Path, cfg, monkeypatch: pytest.MonkeyPatch, capsys) -> None:
-    """定向档不接受 `--allow-dirty`：脏树上仍拒绝，审计记专用原因。"""
-    _no_ci(monkeypatch)
-    monkeypatch.setenv("ENGKIT_RUN_ONCE", "1")
-    (git_repo / "dirty.txt").write_text("x", encoding="utf-8")
-    code = preflight.run_preflight(cfg, mode="scoped", jobs="off", no_cov=True, no_scope=True, allow_dirty=True)
-    assert code == 1
-    assert "只对快速档开放" in capsys.readouterr().err
-    lines = (git_repo / ".cache/preflight/audit.jsonl").read_text(encoding="utf-8").splitlines()
-    assert json.loads(lines[-1])["reason"] == preflight_gate.REASON_ALLOW_DIRTY_SCOPED
+    assert json.loads(lines[-1])["event"] == "run"

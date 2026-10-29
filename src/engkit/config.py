@@ -280,6 +280,31 @@ class PreflightConfig:
 
 
 @dataclass(frozen=True)
+class PushConfig:
+    """推送入口配置（`[push]`）：预检是推送的内部步骤，不再是独立命令。
+
+    Attributes:
+        remote: 远端名。
+        branch: 目标分支（空串取当前分支）。
+        doc_globs: 视为文档的文件名模式；待推提交全为文档时自动降为快速档。
+    """
+
+    remote: str = "origin"
+    branch: str = ""
+    doc_globs: tuple[str, ...] = (
+        "*.md",
+        "*.txt",
+        "*.png",
+        "*.jpg",
+        "*.jpeg",
+        "*.gif",
+        "*.svg",
+        "*.webp",
+        "*.pdf",
+    )
+
+
+@dataclass(frozen=True)
 class RunOnceConfig:
     """重命令回放配置。
 
@@ -779,6 +804,7 @@ class Config:
         coverage: 覆盖率配置。
         pytest: pytest 执行配置。
         preflight: 预检配置。
+        push: 推送入口配置。
         runonce: 回放配置。
         guard: 重命令拦截配置。
         kiwi: 用例登记配置。
@@ -816,6 +842,7 @@ class Config:
     runonce: RunOnceConfig
     guard: GuardConfig
     kiwi: KiwiConfig
+    push: PushConfig = field(default_factory=PushConfig)
     eol: EolConfig = field(default_factory=EolConfig)
     toolchain: ToolchainConfig = field(default_factory=ToolchainConfig)
     base_rules: BaseRules | None = None
@@ -879,6 +906,7 @@ _TOP_KEYS = (
     "guard",
     "kiwi",
     "eol",
+    "push",
     "toolchain",
     "devloop",
 )
@@ -2007,6 +2035,14 @@ def parse(raw: dict[str, Any], path: Path) -> Config:
         window_seconds=int(_scalar(runonce_table, "window_seconds", "runonce", int, 1800)),
     )
 
+    push_table = _table(raw, "push", "push")
+    _check_keys(push_table, ("remote", "branch", "doc_globs"), "push")
+    push = PushConfig(
+        remote=_string(push_table, "remote", "push", "origin"),
+        branch=_string(push_table, "branch", "push", ""),
+        doc_globs=_strings(push_table, "doc_globs", "push") or PushConfig().doc_globs,
+    )
+
     guard_table = _table(raw, "guard", "guard")
     _check_keys(guard_table, ("scripts", "repo_dirs", "dir_test_threshold"), "guard")
     guard = GuardConfig(
@@ -2052,6 +2088,7 @@ def parse(raw: dict[str, Any], path: Path) -> Config:
         runonce=runonce,
         guard=guard,
         kiwi=kiwi,
+        push=push,
         eol=eol,
         toolchain=toolchain,
         base_rules=base_rule_set,

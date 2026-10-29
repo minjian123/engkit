@@ -138,6 +138,46 @@ def worktree_dirty(root: Path) -> tuple[list[str], bool]:
     return list(entries), True
 
 
+def ahead(root: Path, remote: str, branch: str) -> tuple[list[str], list[str], bool]:
+    """取「领先远端的提交」及其涉及的文件（推送入口判定档位的依据）。
+
+    Args:
+        root: 仓库根目录。
+        remote: 远端名（如 `origin`）。
+        branch: 分支名（空串取当前分支）。
+
+    Returns:
+        tuple[list[str], list[str], bool]: （提交号列表, 涉及文件路径, git 是否可判定）。
+            远端引用不存在或 git 不可用时返回空列表与 False。
+    """
+    base = f"{remote}/{branch}" if branch else f"{remote}/HEAD"
+    if not ref_exists(root, base):
+        return [], [], False
+    revs = _run(root, ["rev-list", base + "..HEAD"])
+    diff = _run(root, ["diff", "--name-only", f"{base}..HEAD"])
+    if revs is None or diff is None or revs.returncode != 0 or diff.returncode != 0:
+        return [], [], False
+    commits = [line.strip() for line in revs.stdout.splitlines() if line.strip()]
+    files = [norm(line) for line in diff.stdout.splitlines() if norm(line)]
+    return commits, files, True
+
+
+def current_branch(root: Path) -> str:
+    """取当前分支名（游离 HEAD 时为空串）。
+
+    Args:
+        root: 仓库根目录。
+
+    Returns:
+        str: 分支名；不可判定时为空串。
+    """
+    result = _run(root, ["rev-parse", "--abbrev-ref", "HEAD"])
+    if result is None or result.returncode != 0:
+        return ""
+    name = result.stdout.strip()
+    return "" if name == "HEAD" else name
+
+
 def fingerprint(root: Path) -> str:
     """计算工作区指纹：`HEAD` + 全部变更文件内容哈希。
 

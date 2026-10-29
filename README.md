@@ -14,7 +14,8 @@
 | `engkit run-selected` | 定向执行器：选测 → 跑 pytest → 覆盖率门禁 → 扩圈 → 退化兜底 → 度量 |
 | `engkit run-changed` | 开发环：改动文件 ruff → 后端直接依赖测试 → 前端受影响包（不带覆盖率、不退化全量） |
 | `engkit coverage` | 覆盖率门禁：合并并行采集数据并判定（行 + 分支） |
-| `engkit preflight` | 本地预检：档位（定向 / `--fast` / `--full`）、预算护栏、步骤调度、自测按需 |
+| `engkit preflight` | 预检引擎（**仅 CI 可手动调用**；本地由 `push` 触发） |
+| `engkit push` | 推送入口：档位自动选择（全文档 → 快速档 / 含代码 → 定向档）→ 预检 → 推送 |
 | `engkit run_once` | 重命令包装：同命令同工作区状态下窗口内只真跑一次，命中即回放 |
 | `engkit guard` | 重命令拦截：未包装跑重命令即报错；含 `.pth` 启动钩子安装 / 校验 / 卸载 |
 | `engkit kiwi` | Kiwi TCMS 用例批量登记与回读（SSH + `manage.py shell`，凭据不入库） |
@@ -39,7 +40,7 @@ engkit = { git = "<远端>/engkit.git", rev = "<SHA>" }
 engkit links                 # 文档链接与锚点
 engkit docs-scope            # 文档口径
 engkit preflight --fast      # 快速档（只静态 + 护栏；无参即本档）
-engkit run_once -- engkit preflight --push   # 推送前定向档（须先提交：脏树即拒）
+engkit push                  # 推送入口：预检通过才推送（档位按待推提交自动选）
 ```
 
 配置字段全表与接入步骤见 `engkit文档/`；本仓自身门禁（基础门禁直跑 + 自举烟雾）见 `.gitlab-ci.yml`。

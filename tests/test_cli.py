@@ -184,9 +184,15 @@ def test_preflight_self_test(repo: Path, capsys) -> None:
 
 
 def test_preflight_blocked(repo: Path, capsys) -> None:
-    """未包装即拦截。"""
-    assert cli.main(["preflight", "--root", str(repo), "--fast"]) == 1
-    assert "重命令守卫" in capsys.readouterr().err
+    """本地手动调用预检一律拒绝（推送的内部步骤）。"""
+    assert cli.main(["preflight", "--root", str(repo), "--fast"]) == 2
+    assert "推送的内部步骤" in capsys.readouterr().err
+
+
+def test_push_command(git_repo: Path, capsys) -> None:
+    """`push --check`：无待推提交时直接返回 0。"""
+    assert cli.main(["push", "--root", str(git_repo), "--check", "--jobs", "off"]) == 0
+    assert "[push]" in capsys.readouterr().out
 
 
 def test_preflight_ci(repo: Path, monkeypatch, capsys) -> None:

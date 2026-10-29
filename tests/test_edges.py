@@ -290,7 +290,7 @@ def test_preflight_project_tests_via_engine(cfg, monkeypatch) -> None:
     patched = dataclasses.replace(cfg, preflight=dataclasses.replace(cfg.preflight, steps=steps, self_tests=()))
     labels: list[str] = []
     monkeypatch.setattr(preflight, "execute", lambda label, *a, **k: labels.append(label) or True)
-    assert preflight.run_preflight(patched, mode="full", jobs="off", no_cov=True, no_scope=False) == 0
+    assert preflight.run_preflight(patched, mode="full", jobs="off", no_cov=True, no_scope=False, from_push=True) == 0
     assert labels
 
 

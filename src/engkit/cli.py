@@ -11,11 +11,11 @@ import json
 import sys
 from pathlib import Path
 
-from . import coverage, devloop, docs_links, docs_scope, eol, gitutil, guard, kiwi, preflight, runonce, selection
+from . import coverage, devloop, docs_links, docs_scope, eol, gitutil, guard, kiwi, preflight, push, runonce, selection
 from .config import CONFIG_NAME, Config, ConfigError, load_for
 from .console import configure_stdio, error, out
 
-VERSION = "0.3.0"
+VERSION = "0.4.0"
 """包版本。"""
 
 
@@ -90,18 +90,25 @@ def _build_parser() -> argparse.ArgumentParser:
     gate.add_argument("--quiet", action="store_true", help="不打印度量行")
     gate.add_argument("--clean", action="store_true", help="判定前先清理旧采集文件")
 
-    pre = subparsers.add_parser("preflight", parents=[common], help="本地预检（推送前门禁）")
+    pre = subparsers.add_parser("preflight", parents=[common], help="预检引擎（仅 CI 可手动调用；本地走 push）")
     mode = pre.add_mutually_exclusive_group()
     mode.add_argument("--fast", action="store_true", help="快速档（只静态 + 护栏，无参即本档）")
-    mode.add_argument("--push", action="store_true", help="推送前定向档（静态 + 定向用例 + 覆盖率门禁）")
-    mode.add_argument("--full", action="store_true", help="全量档（显式申请，隐含 --push）")
-    pre.add_argument("--allow-dirty", action="store_true", help="脏工作树也放行（仅快速档；记入审计）")
+    mode.add_argument("--full", action="store_true", help="全量档")
     pre.add_argument("--no-scope", action="store_true", help="全量档跳过逐工程范围")
     pre.add_argument("--no-cov", action="store_true", help="跳过覆盖率门禁")
     pre.add_argument("--jobs", default=preflight.DEFAULT_JOBS, help="并行档位")
     pre.add_argument("--budget-seconds", type=float, default=None, help="总体预算（秒）")
     pre.add_argument("--step-seconds", type=float, default=None, help="单步预算（秒）")
     pre.add_argument("--self-test", action="store_true", help="只跑引擎自检")
+
+    push = subparsers.add_parser("push", parents=[common], help="推送入口：预检通过后自动推送")
+    push.add_argument("--check", action="store_true", help="只跑预检、不推送")
+    push.add_argument("--full", action="store_true", help="全量档（缺省按变更自动选档）")
+    push.add_argument("--remote", default="", help="远端名（缺省取配置）")
+    push.add_argument("--branch", default="", help="目标分支（缺省取配置或当前分支）")
+    push.add_argument("--jobs", default=preflight.DEFAULT_JOBS, help="并行档位")
+    push.add_argument("--budget-seconds", type=float, default=None, help="总体预算（秒）")
+    push.add_argument("--step-seconds", type=float, default=None, help="单步预算（秒）")
 
     once = subparsers.add_parser("run_once", help="重命令包装（缓存回放）")
     once.add_argument("--force", action="store_true", help="忽略缓存真跑")
@@ -501,7 +508,7 @@ def _cmd_coverage(args: argparse.Namespace) -> int:
 
 
 def _cmd_preflight(args: argparse.Namespace) -> int:
-    """执行预检。
+    """执行预检引擎（仅 CI 可手动调用；本地一律拒绝，改走 `engkit push`）。
 
     Args:
         args: 解析结果。
@@ -512,7 +519,7 @@ def _cmd_preflight(args: argparse.Namespace) -> int:
     cfg = _load(args)
     if args.self_test:
         return preflight.self_test(cfg)
-    mode = preflight.resolve_mode(push=args.push, full=args.full)
+    mode = preflight.resolve_mode(full=args.full)
     return preflight.run_preflight(
         cfg,
         mode=mode,
@@ -521,7 +528,28 @@ def _cmd_preflight(args: argparse.Namespace) -> int:
         no_scope=args.no_scope,
         step_seconds=args.step_seconds,
         budget_seconds=args.budget_seconds,
-        allow_dirty=args.allow_dirty,
+    )
+
+
+def _cmd_push(args: argparse.Namespace) -> int:
+    """执行推送入口（预检通过后自动推送）。
+
+    Args:
+        args: 解析结果。
+
+    Returns:
+        int: 退出码。
+    """
+    cfg = _load(args)
+    return push.run_push(
+        cfg,
+        check=args.check,
+        full=args.full,
+        remote=args.remote,
+        branch=args.branch,
+        jobs=args.jobs,
+        step_seconds=args.step_seconds,
+        budget_seconds=args.budget_seconds,
     )
 
 
@@ -729,6 +757,7 @@ _HANDLERS = {
     "run-changed": _cmd_run_changed,
     "coverage": _cmd_coverage,
     "preflight": _cmd_preflight,
+    "push": _cmd_push,
     "run_once": _cmd_run_once,
     "guard": _cmd_guard,
     "eol": _cmd_eol,

@@ -468,31 +468,39 @@ def test_self_test_failure(build_repo) -> None:
     assert preflight.self_test(load(root / "engkit.toml")) == 1
 
 
-def test_run_preflight_blocked(monkeypatch, cfg) -> None:
-    """未包装即拦截（命令零执行）。
+def test_run_preflight_local_rejected(monkeypatch, cfg, capsys) -> None:
+    """本地手动调用预检一律拒绝（退出码 2，零步骤执行）。
 
     `is_ci()` 按 `CI_ENVS` 整张表判定（`GITLAB_CI` / `CI_JOB_ID` 等），只删 `CI` 在真实 CI 里仍判为
     CI 环境，故逐个清空——否则本用例只在本机能过、CI 必挂（2026-10-28 #1278 实测）。
     """
     for name in guard.CI_ENVS:
         monkeypatch.delenv(name, raising=False)
-    assert preflight.run_preflight(cfg, mode="fast", jobs="off", no_cov=False, no_scope=False) == 1
+    assert preflight.run_preflight(cfg, mode="fast", jobs="off", no_cov=False, no_scope=False) == 2
+    assert "推送的内部步骤" in capsys.readouterr().err
 
 
 def test_run_preflight_invalid_jobs(cfg) -> None:
     """非法并行档位返回 1。"""
-    assert preflight.run_preflight(cfg, mode="fast", jobs="abc", no_cov=False, no_scope=False) == 1
+    assert preflight.run_preflight(cfg, mode="fast", jobs="abc", no_cov=False, no_scope=False, from_push=True) == 1
 
 
 def test_run_preflight_fast(cfg) -> None:
     """快速档执行静态步骤与全跑自测。"""
-    assert preflight.run_preflight(cfg, mode="fast", jobs="off", no_cov=True, no_scope=True) == 0
+    assert preflight.run_preflight(cfg, mode="fast", jobs="off", no_cov=True, no_scope=True, from_push=True) == 0
 
 
 def test_run_preflight_budget_zero(cfg) -> None:
     """预算为零即中止并判失败。"""
     code = preflight.run_preflight(
-        cfg, mode="fast", jobs="off", no_cov=True, no_scope=True, step_seconds=0.0, budget_seconds=0.0
+        cfg,
+        mode="fast",
+        jobs="off",
+        no_cov=True,
+        no_scope=True,
+        step_seconds=0.0,
+        budget_seconds=0.0,
+        from_push=True,
     )
     assert code == 1
 
@@ -512,8 +520,10 @@ def test_run_preflight_full_steps(cfg, monkeypatch) -> None:
     monkeypatch.setattr(preflight, "_run_scoped_step", lambda *args, **kwargs: None)
     monkeypatch.setattr(preflight, "run_full_tests", lambda *args, **kwargs: None)
     monkeypatch.setattr(preflight, "run_project_tests", lambda *args, **kwargs: None)
-    assert preflight.run_preflight(patched, mode="scoped", jobs="off", no_cov=False, no_scope=False) == 0
-    assert preflight.run_preflight(patched, mode="full", jobs="off", no_cov=False, no_scope=True) == 0
+    assert (
+        preflight.run_preflight(patched, mode="scoped", jobs="off", no_cov=False, no_scope=False, from_push=True) == 0
+    )
+    assert preflight.run_preflight(patched, mode="full", jobs="off", no_cov=False, no_scope=True, from_push=True) == 0
 
 
 def test_tee(capsys) -> None:

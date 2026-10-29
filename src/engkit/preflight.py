@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from . import coverage, gitutil, guard, preflight_gate, selection
+from . import coverage, gitutil, guard, preflight_gate, runonce, selection
 from .config import Config, SelfTest, Step
 from .console import finish, note, out, section
 
@@ -786,30 +786,16 @@ def self_test(cfg: Config) -> int:
     return 0
 
 
-def preflight_blocked() -> bool:
-    """预检入口是否应被重命令守卫拦截。
-
-    Returns:
-        bool: 应拦截返回 True。
-    """
-    return not (guard.is_ci() or guard.is_wrapped() or guard.allow_unwrapped())
-
-
-def resolve_mode(*, push: bool, full: bool) -> str:
-    """解析预检档位（无参即快速档；`--push` 走定向档；`--full` 优先）。
+def resolve_mode(*, full: bool) -> str:
+    """解析预检档位（本地只用快速档与全量档；定向档由推送入口按变更自动选择）。
 
     Args:
-        push: 是否显式声明推送前定向档。
-        full: 是否显式申请全量档（隐含 `--push`）。
+        full: 是否显式申请全量档。
 
     Returns:
-        str: 档位（`fast` / `scoped` / `full`）。
+        str: 档位（`fast` / `full`）。
     """
-    if full:
-        return "full"
-    if push:
-        return "scoped"
-    return "fast"
+    return "full" if full else "fast"
 
 
 def run_preflight(
@@ -821,7 +807,7 @@ def run_preflight(
     no_scope: bool,
     step_seconds: float | None = None,
     budget_seconds: float | None = None,
-    allow_dirty: bool = False,
+    from_push: bool = False,
 ) -> int:
     """执行预检。
 
@@ -833,27 +819,35 @@ def run_preflight(
         no_scope: 是否跳过逐工程范围（仅全量档有意义）。
         step_seconds: 单步预算覆盖。
         budget_seconds: 总体预算覆盖。
-        allow_dirty: 脏工作树也放行（仅快速档；记入审计）。
+        from_push: 是否由推送入口（`engkit push`）调用；本地手动调用一律拒绝。
 
     Returns:
-        int: 退出码（0 全通过 / 1 有失败项或被闸门拒绝）。
+        int: 退出码（0 全通过 / 1 有失败项或被闸门拒绝 / 2 本地手动调用）。
     """
-    if preflight_blocked():
-        print(guard.heavy_guidance("script"), file=sys.stderr)
-        return 1
+    if not from_push and not guard.is_ci():
+        print(
+            "[engkit] 预检是**推送的内部步骤**，本地不再单独执行。\n"
+            "  准备推送：engkit push（预检通过后自动推送）\n"
+            "  只验证不推送：engkit push --check\n"
+            "  开发中改完即测请用开发环：engkit run-changed\n"
+            "  CI 环境不受此限制。",
+            file=sys.stderr,
+        )
+        return 2
+    if from_push:
+        # 推送入口不套 run_once，但仍要放行预检内部的重命令（pytest / ruff / pyright）：
+        # 注入包装标记，子进程继承后守卫即放行。
+        os.environ[runonce.WRAPPED_ENV] = "1"
     try:
         jobs_args(jobs)
     except ValueError as error:
         print(f"[engkit] {error}")
         return 1
-    decision = preflight_gate.evaluate(cfg, allow_dirty=allow_dirty, mode=mode)
+    decision = preflight_gate.evaluate(cfg)
     if decision.blocked:
         print(preflight_gate.guidance(decision), file=sys.stderr)
         preflight_gate.write(cfg, event=preflight_gate.EVENT_REJECTED, mode=mode, decision=decision)
         return 1
-    if decision.bypassed:
-        out(f"[engkit] 预检闸门：`--allow-dirty` 放行（工作树 {len(decision.entries)} 处未提交改动，已记入审计）")
-        preflight_gate.write(cfg, event=preflight_gate.EVENT_BYPASS, mode=mode, decision=decision)
     started = time.monotonic()
     scoped_budget, full_budget = cfg.preflight.budget.scoped, cfg.preflight.budget.full
     default_step, default_total = full_budget if mode == "full" else scoped_budget
