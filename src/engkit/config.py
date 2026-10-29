@@ -230,6 +230,19 @@ class BudgetConfig:
 
 
 @dataclass(frozen=True)
+class PreflightGateConfig:
+    """预检场景闸门与调用审计（`[preflight.gate]`）。
+
+    Attributes:
+        dirty_tree: 脏工作树即拒绝（预检是推送前门禁；可在仓配置关闭）。
+        audit_file: 调用审计落点（相对仓根；空串表示不记录）。
+    """
+
+    dirty_tree: bool = True
+    audit_file: str = ".cache/preflight/audit.jsonl"
+
+
+@dataclass(frozen=True)
 class PreflightConfig:
     """预检配置。
 
@@ -237,6 +250,7 @@ class PreflightConfig:
         cwd: 缺省工作目录（相对仓根）。
         since: 变更基准（git 引用）。
         budget: 预算护栏。
+        gate: 场景闸门与调用审计。
         steps: 步骤（按声明序执行）。
         self_tests: 护栏自测。
     """
@@ -244,6 +258,7 @@ class PreflightConfig:
     cwd: str = "."
     since: str = "origin/main"
     budget: BudgetConfig = field(default_factory=BudgetConfig)
+    gate: PreflightGateConfig = field(default_factory=PreflightGateConfig)
     steps: tuple[Step, ...] = ()
     self_tests: tuple[SelfTest, ...] = ()
 
@@ -1901,15 +1916,21 @@ def parse(raw: dict[str, Any], path: Path) -> Config:
     )
 
     preflight_table = _table(raw, "preflight", "preflight")
-    _check_keys(preflight_table, ("cwd", "since", "budget", "steps", "self_tests"), "preflight")
+    _check_keys(preflight_table, ("cwd", "since", "budget", "gate", "steps", "self_tests"), "preflight")
     budget_table = _table(preflight_table, "budget", "preflight.budget")
     _check_keys(budget_table, ("scoped", "full"), "preflight.budget")
+    gate_table = _table(preflight_table, "gate", "preflight.gate")
+    _check_keys(gate_table, ("dirty_tree", "audit_file"), "preflight.gate")
     preflight_config = PreflightConfig(
         cwd=_string(preflight_table, "cwd", "preflight", "."),
         since=_string(preflight_table, "since", "preflight", "origin/main"),
         budget=BudgetConfig(
             scoped=_floats(budget_table, "scoped", "preflight.budget", (300.0, 420.0)),
             full=_floats(budget_table, "full", "preflight.budget", (900.0, 1800.0)),
+        ),
+        gate=PreflightGateConfig(
+            dirty_tree=bool(_scalar(gate_table, "dirty_tree", "preflight.gate", bool, True)),
+            audit_file=_string(gate_table, "audit_file", "preflight.gate", ".cache/preflight/audit.jsonl"),
         ),
         steps=_parse_steps(preflight_table, "preflight"),
         self_tests=_parse_self_tests(preflight_table, "preflight"),

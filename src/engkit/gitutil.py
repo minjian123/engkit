@@ -116,6 +116,28 @@ def _hash_file(path: Path) -> str:
         return "<unreadable>"
 
 
+def worktree_dirty(root: Path) -> tuple[list[str], bool]:
+    """取工作树的未提交条目（已跟踪改动 + 未跟踪文件；忽略 `.gitignore` 覆盖的产物）。
+
+    预检闸门据此判定「是否处于开发中」：准备推送的工作树应当是干净的。
+
+    Args:
+        root: 仓库根目录。
+
+    Returns:
+        tuple[list[str], bool]: （去重后的条目路径, git 是否可判定；无 git 时为 False，供调用方放行）。
+    """
+    result = _run(root, ["status", "--porcelain", "-z", "--untracked-files=all"])
+    if result is None or result.returncode != 0:
+        return [], False
+    entries: dict[str, None] = {}
+    for item in result.stdout.split("\0"):
+        rel = norm(item[3:])
+        if rel:
+            entries.setdefault(rel, None)
+    return list(entries), True
+
+
 def fingerprint(root: Path) -> str:
     """计算工作区指纹：`HEAD` + 全部变更文件内容哈希。
 

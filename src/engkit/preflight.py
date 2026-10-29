@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from . import coverage, gitutil, guard, selection
+from . import coverage, gitutil, guard, preflight_gate, selection
 from .config import Config, SelfTest, Step
 from .console import finish, note, out, section
 
@@ -795,6 +795,23 @@ def preflight_blocked() -> bool:
     return not (guard.is_ci() or guard.is_wrapped() or guard.allow_unwrapped())
 
 
+def resolve_mode(*, push: bool, full: bool) -> str:
+    """解析预检档位（无参即快速档；`--push` 走定向档；`--full` 优先）。
+
+    Args:
+        push: 是否显式声明推送前定向档。
+        full: 是否显式申请全量档（隐含 `--push`）。
+
+    Returns:
+        str: 档位（`fast` / `scoped` / `full`）。
+    """
+    if full:
+        return "full"
+    if push:
+        return "scoped"
+    return "fast"
+
+
 def run_preflight(
     cfg: Config,
     *,
@@ -804,6 +821,7 @@ def run_preflight(
     no_scope: bool,
     step_seconds: float | None = None,
     budget_seconds: float | None = None,
+    allow_dirty: bool = False,
 ) -> int:
     """执行预检。
 
@@ -815,9 +833,10 @@ def run_preflight(
         no_scope: 是否跳过逐工程范围（仅全量档有意义）。
         step_seconds: 单步预算覆盖。
         budget_seconds: 总体预算覆盖。
+        allow_dirty: 脏工作树也放行（仅快速档；记入审计）。
 
     Returns:
-        int: 退出码（0 全通过 / 1 有失败项）。
+        int: 退出码（0 全通过 / 1 有失败项或被闸门拒绝）。
     """
     if preflight_blocked():
         print(guard.heavy_guidance("script"), file=sys.stderr)
@@ -827,6 +846,15 @@ def run_preflight(
     except ValueError as error:
         print(f"[engkit] {error}")
         return 1
+    decision = preflight_gate.evaluate(cfg, allow_dirty=allow_dirty, mode=mode)
+    if decision.blocked:
+        print(preflight_gate.guidance(decision), file=sys.stderr)
+        preflight_gate.write(cfg, event=preflight_gate.EVENT_REJECTED, mode=mode, decision=decision)
+        return 1
+    if decision.bypassed:
+        out(f"[engkit] 预检闸门：`--allow-dirty` 放行（工作树 {len(decision.entries)} 处未提交改动，已记入审计）")
+        preflight_gate.write(cfg, event=preflight_gate.EVENT_BYPASS, mode=mode, decision=decision)
+    started = time.monotonic()
     scoped_budget, full_budget = cfg.preflight.budget.scoped, cfg.preflight.budget.full
     default_step, default_total = full_budget if mode == "full" else scoped_budget
     budget = Budget(
@@ -866,4 +894,13 @@ def run_preflight(
     run_self_tests(cfg, budget, failures, force_all=mode in ("fast", "full"), mode=mode)
     if budget.exhausted:
         out("\n[engkit] 提示：预算护栏已中止剩余步骤 —— 全量与集成交 CI（推送后按需触发流水线）。")
-    return finish("preflight", failures)
+    code = finish("preflight", failures)
+    preflight_gate.write(
+        cfg,
+        event=preflight_gate.EVENT_RUN,
+        mode=mode,
+        decision=decision,
+        duration_seconds=time.monotonic() - started,
+        exit_code=code,
+    )
+    return code

@@ -196,12 +196,13 @@ def git(root: Path, *args: str) -> None:
 
 
 def init_git(root: Path) -> None:
-    """初始化 git 仓库并提交一次。
+    """初始化 git 仓库并提交一次（关闭 autocrlf 转换，保证工作树判定确定）。
 
     Args:
         root: 仓库根。
     """
     git(root, "init", "-q")
+    git(root, "config", "core.autocrlf", "false")
     git(root, "add", "-A")
     git(root, "commit", "-q", "-m", "init")
 

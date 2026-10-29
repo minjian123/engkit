@@ -1,6 +1,6 @@
 [project]
 name = "engkit"
-version = "0.2.0"
+version = "0.3.0"
 description = "跨仓工程化工具包：文档链接与口径护栏、预检与重命令包装、用例登记"
 readme = "README.md"
 requires-python = ">=3.11"

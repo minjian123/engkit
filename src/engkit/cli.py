@@ -15,7 +15,7 @@ from . import coverage, devloop, docs_links, docs_scope, eol, gitutil, guard, ki
 from .config import CONFIG_NAME, Config, ConfigError, load_for
 from .console import configure_stdio, error, out
 
-VERSION = "0.2.0"
+VERSION = "0.3.0"
 """包版本。"""
 
 
@@ -89,10 +89,12 @@ def _build_parser() -> argparse.ArgumentParser:
     gate.add_argument("--quiet", action="store_true", help="不打印度量行")
     gate.add_argument("--clean", action="store_true", help="判定前先清理旧采集文件")
 
-    pre = subparsers.add_parser("preflight", parents=[common], help="本地预检")
+    pre = subparsers.add_parser("preflight", parents=[common], help="本地预检（推送前门禁）")
     mode = pre.add_mutually_exclusive_group()
-    mode.add_argument("--fast", action="store_true", help="秒级自检（跳过测试段）")
-    mode.add_argument("--full", action="store_true", help="全量档（显式申请）")
+    mode.add_argument("--fast", action="store_true", help="快速档（只静态 + 护栏，无参即本档）")
+    mode.add_argument("--push", action="store_true", help="推送前定向档（静态 + 定向用例 + 覆盖率门禁）")
+    mode.add_argument("--full", action="store_true", help="全量档（显式申请，隐含 --push）")
+    pre.add_argument("--allow-dirty", action="store_true", help="脏工作树也放行（仅快速档；记入审计）")
     pre.add_argument("--no-scope", action="store_true", help="全量档跳过逐工程范围")
     pre.add_argument("--no-cov", action="store_true", help="跳过覆盖率门禁")
     pre.add_argument("--jobs", default=preflight.DEFAULT_JOBS, help="并行档位")
@@ -492,7 +494,7 @@ def _cmd_preflight(args: argparse.Namespace) -> int:
     cfg = _load(args)
     if args.self_test:
         return preflight.self_test(cfg)
-    mode = "full" if args.full else ("fast" if args.fast else "scoped")
+    mode = preflight.resolve_mode(push=args.push, full=args.full)
     return preflight.run_preflight(
         cfg,
         mode=mode,
@@ -501,6 +503,7 @@ def _cmd_preflight(args: argparse.Namespace) -> int:
         no_scope=args.no_scope,
         step_seconds=args.step_seconds,
         budget_seconds=args.budget_seconds,
+        allow_dirty=args.allow_dirty,
     )
 
 

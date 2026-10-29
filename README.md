@@ -38,8 +38,8 @@ engkit = { git = "<远端>/engkit.git", rev = "<SHA>" }
 ```bash
 engkit links                 # 文档链接与锚点
 engkit docs-scope            # 文档口径
-engkit preflight --fast      # 秒级自检
-engkit run_once -- engkit preflight   # 分钟级命令经包装调用
+engkit preflight --fast      # 快速档（只静态 + 护栏；无参即本档）
+engkit run_once -- engkit preflight --push   # 推送前定向档（须先提交：脏树即拒）
 ```
 
 配置字段全表与接入步骤见 `engkit文档/`；本仓自身门禁（基础门禁直跑 + 自举烟雾）见 `.gitlab-ci.yml`。
