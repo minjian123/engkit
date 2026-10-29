@@ -20,6 +20,22 @@ class ConfigError(Exception):
 
 
 @dataclass(frozen=True)
+class DevloopStep:
+    """开发环的一条附加步骤（护栏 / 静态检查；命令由仓配置声明）。
+
+    Attributes:
+        label: 步骤名（输出用）。
+        cmd: 命令模板；支持占位 `{python}` / `{root}` / `{changed}`（全量改动清单文件）/
+            `{changed_py}`（只含 .py 的清单文件）/ `{changed_py*}`（展开为多个 .py 文件路径）。
+        only_if: 执行条件；`changed_py` 表示「本次改动含 .py 才跑」，空串表示总跑。
+    """
+
+    label: str
+    cmd: tuple[str, ...]
+    only_if: str = ""
+
+
+@dataclass(frozen=True)
 class ScopeRule:
     """一条文档口径规则。
 
@@ -815,6 +831,7 @@ class Config:
     backend_global: GlobalRule = field(default_factory=GlobalRule)
     backend_extra: tuple[ExtraTests, ...] = ()
     frontend_global: GlobalRule = field(default_factory=GlobalRule)
+    devloop_steps: tuple[DevloopStep, ...] = ()
 
     def resolve(self, rel: str) -> Path:
         """把仓根相对路径解析为绝对路径。
@@ -858,6 +875,7 @@ _TOP_KEYS = (
     "kiwi",
     "eol",
     "toolchain",
+    "devloop",
 )
 
 _MISSING: Any = object()
@@ -1755,6 +1773,43 @@ def _parse_product_literals_rules(table: dict[str, Any], where: str) -> ProductL
     )
 
 
+def _parse_devloop_steps(raw: dict[str, Any]) -> tuple[DevloopStep, ...]:
+    """解析 `[[devloop.steps]]`（缺省空表）。
+
+    Args:
+        raw: TOML 映射。
+
+    Returns:
+        tuple[DevloopStep, ...]: 步骤清单。
+
+    Raises:
+        ConfigError: 结构非法（缺 label / cmd 非字符串数组 / only_if 取值不支持）。
+    """
+    section = raw.get("devloop")
+    if section is None:
+        return ()
+    if not isinstance(section, dict):
+        raise ConfigError("[devloop] 必须是表")
+    raw_steps = section.get("steps", [])
+    if not isinstance(raw_steps, list):
+        raise ConfigError("[devloop].steps 必须是表数组")
+    steps: list[DevloopStep] = []
+    for index, item in enumerate(raw_steps, 1):
+        if not isinstance(item, dict):
+            raise ConfigError(f"[devloop].steps 第 {index} 项必须是表")
+        label = item.get("label")
+        cmd = item.get("cmd")
+        only_if = item.get("only_if", "")
+        if not isinstance(label, str) or not label.strip():
+            raise ConfigError(f"[devloop].steps 第 {index} 项缺 label")
+        if not isinstance(cmd, list) or not cmd or not all(isinstance(token, str) for token in cmd):
+            raise ConfigError(f"[devloop].steps 第 {index} 项 cmd 必须是非空字符串数组")
+        if not isinstance(only_if, str) or only_if not in ("", "changed_py"):
+            raise ConfigError(f"[devloop].steps 第 {index} 项 only_if 只支持 changed_py")
+        steps.append(DevloopStep(label=label, cmd=tuple(cmd), only_if=only_if))
+    return tuple(steps)
+
+
 def parse(raw: dict[str, Any], path: Path) -> Config:
     """把已解析的 TOML 映射转成配置对象。
 
@@ -2008,6 +2063,7 @@ def parse(raw: dict[str, Any], path: Path) -> Config:
         backend_global=backend_global,
         backend_extra=backend_extra,
         frontend_global=frontend_global,
+        devloop_steps=_parse_devloop_steps(raw),
     )
 
 

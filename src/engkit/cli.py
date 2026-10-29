@@ -76,6 +76,7 @@ def _build_parser() -> argparse.ArgumentParser:
     changed.add_argument("--changed-from", default="", help="对比基准（缺省取配置）")
     changed.add_argument("--changed-file", action="append", default=[], help="显式变更文件（可重复）")
     changed.add_argument("--changed-file-list", default="", help="变更清单文件")
+    changed.add_argument("--no-steps", action="store_true", help="跳过 `[[devloop.steps]]` 附加步骤")
     changed.add_argument("--jobs", default=preflight.DEFAULT_JOBS, help="并行档位：auto / 正整数 / off")
     changed.add_argument("--timeout", type=float, default=0.0, help="后端单轮超时（秒；0 不设限）")
     changed.add_argument("--no-lint", action="store_true", help="跳过改动文件 ruff")
@@ -460,6 +461,7 @@ def _cmd_run_changed(args: argparse.Namespace) -> int:
         timeout=args.timeout,
         lint=not args.no_lint,
         frontend=not args.no_frontend,
+        steps=not args.no_steps,
     )
 
 

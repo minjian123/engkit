@@ -11,11 +11,12 @@ from __future__ import annotations
 import shlex
 import shutil
 import subprocess
+import sys
 import time
 from pathlib import Path
 
 from . import preflight, selection
-from .config import Config
+from .config import Config, DevloopStep
 from .console import error, out
 
 _LINT_CHUNK = 50
@@ -112,6 +113,101 @@ def _frontend_changed(cfg: Config, changed: list[str]) -> int:
     return 0
 
 
+_CHANGED_LIST_NAME = "changed.txt"
+"""全量改动清单文件名（落 `.cache/devloop/`，供步骤占位 `{changed}` 引用）。"""
+
+_CHANGED_PY_LIST_NAME = "changed_py.txt"
+"""只含 `.py` 的清单文件名（供占位 `{changed_py}` 引用）。"""
+
+
+def _write_changed_lists(cfg: Config, changed: list[str], py_files: list[str]) -> tuple[Path, Path]:
+    """把改动清单落盘（`.cache/devloop/`，不进 git）。
+
+    Args:
+        cfg: 仓配置。
+        changed: 全量改动清单。
+        py_files: 其中的 `.py` 文件。
+
+    Returns:
+        tuple[Path, Path]: (全量清单, `.py` 清单) 的绝对路径。
+    """
+    base = cfg.root / ".cache" / "devloop"
+    base.mkdir(parents=True, exist_ok=True)
+    total = base / _CHANGED_LIST_NAME
+    py_list = base / _CHANGED_PY_LIST_NAME
+    total.write_text("".join(f"{rel}\n" for rel in changed), encoding="utf-8")
+    py_list.write_text("".join(f"{rel}\n" for rel in py_files), encoding="utf-8")
+    return total, py_list
+
+
+def _expand_step(
+    cfg: Config,
+    step: DevloopStep,
+    *,
+    total_list: Path,
+    py_list: Path,
+    py_files: list[str],
+) -> list[str]:
+    """展开步骤命令模板的占位符。
+
+    Args:
+        cfg: 仓配置。
+        step: 步骤。
+        total_list: 全量清单路径。
+        py_list: `.py` 清单路径。
+        py_files: `.py` 改动文件（相对仓根）。
+
+    Returns:
+        list[str]: 可直接执行的 argv。
+    """
+    argv: list[str] = []
+    for token in step.cmd:
+        if token == "{changed_py*}":
+            argv.extend(str(cfg.root / rel) for rel in py_files)
+            continue
+        argv.append(
+            {
+                "{python}": sys.executable,
+                "{root}": str(cfg.root),
+                "{changed}": str(total_list),
+                "{changed_py}": str(py_list),
+            }.get(token, token)
+        )
+    return argv
+
+
+def _run_steps(cfg: Config, changed: list[str]) -> int:
+    """按配置顺序跑附加步骤（失败即停）。
+
+    条件化跳过（避免「该跳没跳」导致误判）：
+    - `only_if = changed_py` 且本次无改动 `.py`；
+    - 命令里含 `{changed_py}` / `{changed_py*}` 占位但本次无改动 `.py`（展开会得到空参数，
+      典型后果是工具退回全量扫描，与「只查改动」的意图相反）。
+
+    Args:
+        cfg: 仓配置。
+        changed: 改动文件清单（相对仓根）。
+
+    Returns:
+        int: 退出码（0 全通过 / 非 0 首个失败步骤的退出码）。
+    """
+    if not cfg.devloop_steps:
+        return 0
+    py_files = [rel for rel in changed if rel.endswith(".py") and (cfg.root / rel).is_file()]
+    total_list, py_list = _write_changed_lists(cfg, changed, py_files)
+    for step in cfg.devloop_steps:
+        uses_py = any("{changed_py" in token for token in step.cmd)
+        if (step.only_if == "changed_py" or uses_py) and not py_files:
+            out(f"[devloop] 跳过：{step.label}（无改动 .py）")
+            continue
+        out(f"[devloop] 附加步骤：{step.label}")
+        code = _exec(_expand_step(cfg, step, total_list=total_list, py_list=py_list, py_files=py_files), cfg.root)
+        if code != 0:
+            out(f"[devloop] 附加步骤未过 ⇒ {step.label}，测试未执行")
+            return code
+    return 0
+
+
 def run_changed(
     cfg: Config,
     *,
@@ -122,8 +218,9 @@ def run_changed(
     timeout: float = 0.0,
     lint: bool = True,
     frontend: bool = True,
+    steps: bool = True,
 ) -> int:
-    """开发环主流程：ruff（改动文件）→ 后端直接依赖测试 → 前端受影响包测试。
+    """开发环主流程：ruff（改动文件）→ 附加步骤（护栏 / 静态）→ 后端直接依赖测试 → 前端受影响包测试。
 
     Args:
         cfg: 仓配置。
@@ -134,6 +231,7 @@ def run_changed(
         timeout: 后端单轮超时（秒；0 不设限）。
         lint: 是否跑改动文件 ruff。
         frontend: 是否跑前端受影响包。
+        steps: 是否跑 `[[devloop.steps]]` 声明的附加步骤。
 
     Returns:
         int: 退出码（0 全部通过 / 非 0 首个失败环节）。
@@ -158,6 +256,10 @@ def run_changed(
         code = _lint_changed(cfg, changed)
         if code != 0:
             out("[devloop] 静态未过 ⇒ 先修 lint，测试未执行")
+            return code
+    if steps:
+        code = _run_steps(cfg, changed)
+        if code != 0:
             return code
     code = preflight.run_selected(cfg, changed=changed, jobs=jobs, cov=False, timeout=timeout, depth="direct")
     if code != 0:
