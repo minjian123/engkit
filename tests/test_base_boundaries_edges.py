@@ -151,7 +151,7 @@ def test_layout_branches(tmp_path: Path) -> None:
     assert planned.public_api_of("ghost") == ()
     assert planned.domain_services() == {"a": "s"}
     assert planned.entry_of("ghost") is None
-    assert not planned.is_shared("a")
+    assert planned.shared_files(tmp_path) == {}
 
 
 def test_ast_helpers() -> None:

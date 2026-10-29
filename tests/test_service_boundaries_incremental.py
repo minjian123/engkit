@@ -402,3 +402,46 @@ def test_full_scan_reason_tolerates_empty_rule_sources(tmp_path: Path) -> None:
     rule = sample(ownership_module="", catalog_module="")
     reason = sb.full_scan_reason(cfg_of(repo(tmp_path)), rule, ["pkg/tables.py"])
     assert reason is None
+
+
+def test_shared_glob_covers_skeleton_but_not_new_module(tmp_path: Path) -> None:
+    """域外路径支持 glob：骨架 `__init__.py` 自动放行，同目录下的实现文件仍报未归属。"""
+    layout = {
+        "version": 1,
+        "domains": [
+            {
+                "domain_key": "alpha",
+                "service_key": "alpha",
+                "paths": ["pkg/services/alpha/src/alpha/**/*.py"],
+            },
+            {"domain_key": "beta", "service_key": "beta", "paths": ["pkg/services/beta/src/beta/api/**/*.py"]},
+        ],
+        "shared_paths": ["pkg/services/*/src/*/*/__init__.py"],
+    }
+    root = repo(
+        tmp_path,
+        layout=layout,
+        **{"pkg/services/beta/src/beta/utils/__init__.py": "", "pkg/services/beta/src/beta/utils/impl.py": "X = 1\n"},
+    )
+    joined = "\n".join(sb.check(cfg_of(root), sample()).problems)
+    assert "utils/__init__.py" not in joined
+    assert "[域实现未登记] pkg/services/beta/src/beta/utils/impl.py" in joined
+
+
+def test_domain_and_shared_overlap_is_reported(tmp_path: Path) -> None:
+    """域路径与域外声明**展开后**重叠即报错（glob 化后字符串比对已经不够）。"""
+    layout = {
+        "version": 1,
+        "domains": [
+            {
+                "domain_key": "alpha",
+                "service_key": "alpha",
+                "paths": ["pkg/services/alpha/src/alpha/api/**/*.py"],
+            },
+            {"domain_key": "beta", "service_key": "beta", "paths": ["pkg/services/beta/src/beta/**/*.py"]},
+        ],
+        "shared_paths": ["pkg/services/alpha/src/alpha/api/__init__.py"],
+    }
+    root = repo(tmp_path, layout=layout)
+    joined = "\n".join(sb.check(cfg_of(root), sample()).problems)
+    assert "同时归属域 alpha 与域外路径" in joined

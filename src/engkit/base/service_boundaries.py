@@ -359,16 +359,24 @@ class Layout:
         """
         return {entry.domain_key: entry.service_key for entry in self.entries}
 
-    def is_shared(self, rel: str) -> bool:
-        """是否域外路径。
+    def shared_files(self, root: Path) -> dict[str, None]:
+        """展开域外声明为**文件集合**（支持 glob，按 `Path.glob` 语义）。
+
+        域外路径与域路径同权支持 glob：骨架面（`__init__.py` / 装配入口 / 路由）按目录派生，
+        新形态目录仍需逐条登记。展开而非字符串比对，是为了让「域外」与「路径命中文件」
+        用同一套 pathlib 语义——自己写通配匹配迟早与 `expand` 判得不一样。
 
         Args:
-            rel: 相对仓库根的 posix 路径。
+            root: 仓库根。
 
         Returns:
-            bool: 域外声明 True。
+            dict[str, None]: 域外文件相对路径（保序去重）。
         """
-        return normalize(rel) in self.shared
+        found: dict[str, None] = {}
+        for declared in self.shared:
+            for item in expand(root, declared):
+                found.setdefault(item, None)
+        return found
 
     def resolve_files(self, root: Path) -> tuple[dict[str, str], list[str]]:
         """展开声明路径为「文件 → 域」索引。
@@ -1476,6 +1484,8 @@ class Checker:
         self.packages: dict[str, Package] = {}
         self.layout = Layout(entries=(), shared=())
         self.file_domain: dict[str, str] = {}
+        self.shared_files: dict[str, None] = {}
+        """域外文件集合（由域外声明展开而来，支持 glob）。"""
         self.domain_enabled = False
         self.baseline: dict[tuple[str, str, str, str, str], bool] = {}
         self.pending: list[BaselineEntry] = []
@@ -1654,10 +1664,18 @@ class Checker:
         self.outcome.counts["domain_baseline_total"] = len(entries)
         self.baseline = {(e.kind, e.domain, e.target, e.file, e.fingerprint): False for e in entries}
         self.file_domain, problems = self.layout.resolve_files(self.root)
+        self.shared_files = self.layout.shared_files(self.root)
         for message in problems:
             self.record(message, "domain_layout_violation")
         for message in self.layout.validate(self.root):
             self.record(message, "domain_layout_violation")
+        for rel in self.file_domain:
+            if rel in self.shared_files:
+                self.record(
+                    f"[域布局] {rel} 同时归属域 {self.file_domain[rel]} 与域外路径"
+                    "（域与域外声明展开后重叠，须收窄其中一侧）",
+                    "domain_layout_violation",
+                )
 
     def check_imports(self, names: set[str]) -> None:
         """规则 1 ~ 4：跨服务依赖、分层反向依赖、跨包私有引用。
@@ -2205,7 +2223,7 @@ class Checker:
                     continue
                 if rel in self.file_domain:
                     registered += 1
-                elif not self.layout.is_shared(rel):
+                elif rel not in self.shared_files:
                     unregistered.append(rel)
         self.outcome.counts["domain_files_registered"] = registered
         self.outcome.counts["domain_files_unregistered"] = len(unregistered)
