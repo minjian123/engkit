@@ -639,6 +639,8 @@ class ServiceBoundariesRules:
         shared_lib_service: 共享库包归属的服务标识。
         domain_subdir: 域子包目录名（`domains/<域>/<层>`）。
         shared_table_prefixes: 平台共享表前缀（按表级归属判定、不判前缀冲突）。
+        incremental_full_when: 增量扫描升为全量的路径 glob（生成物 / 清单目录等仓特有触发面；
+            布局 / 基线 / 例外 / 归属登记 / 目录登记由规则字段自身推出，不必在此重复）。
     """
 
     shared_groups: tuple[str, ...]
@@ -669,6 +671,7 @@ class ServiceBoundariesRules:
     shared_lib_service: str = ""
     domain_subdir: str = "domains"
     shared_table_prefixes: tuple[str, ...] = ()
+    incremental_full_when: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -1604,6 +1607,7 @@ def _parse_boundaries_rules(table: dict[str, Any], where: str) -> ServiceBoundar
             "shared_lib_service",
             "domain_subdir",
             "shared_table_prefixes",
+            "incremental_full_when",
         ),
         where,
     )
@@ -1648,6 +1652,7 @@ def _parse_boundaries_rules(table: dict[str, Any], where: str) -> ServiceBoundar
         shared_lib_service=_string(table, "shared_lib_service", where, ""),
         domain_subdir=_string(table, "domain_subdir", where, "domains"),
         shared_table_prefixes=_strings(table, "shared_table_prefixes", where),
+        incremental_full_when=_strings(table, "incremental_full_when", where),
     )
 
 

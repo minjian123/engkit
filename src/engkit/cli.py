@@ -175,6 +175,15 @@ def _build_parser() -> argparse.ArgumentParser:
                 default="",
                 help="只扫清单内文件（一行一个相对仓根路径；增量模式，规则为文件局部故与全量等价）",
             )
+        if name == "service-boundaries":
+            action.add_argument(
+                "--files-from",
+                default="",
+                help=(
+                    "只对清单内文件跑逐文件判据（一行一个相对仓根路径）；全局判据恒全量，"
+                    "触碰布局 / 基线 / 例外 / 归属登记或清单内文件已删除时自动升为全量"
+                ),
+            )
         if name == "product-literals":
             action.add_argument("--baseline-ref", default="", help="基线只减不增断言的比较基准（缺省取配置）")
         if name == "bare-collections":
@@ -656,6 +665,7 @@ def _cmd_base(args: argparse.Namespace) -> int:
             json_output=bool(args.json),
             update_baseline=bool(args.update_baseline),
             as_self_test=bool(args.self_test),
+            files_from=str(args.files_from),
         )
     if name == "boundary-metrics":
         from .base import metrics

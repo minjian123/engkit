@@ -32,12 +32,15 @@ import hashlib
 import json
 import re
 import tempfile
+from collections.abc import Sequence
 from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path
 
 from ..config import Config, ServiceBoundariesRules, parse
 from ..console import out
 from .rules import RulesError, read_text, require
+from .scan_scope import read_file_list
 
 MIN_KEYS = (
     "shared_libs",
@@ -53,6 +56,14 @@ MIN_KEYS = (
 
 SQL_HINTS = ("select", "insert", "update", "delete", "from", "join")
 """字符串常量按 SQL 认定的关键词（命中才做语句分析）。"""
+
+TABLENAME_MARKER = "__tablename__"
+"""表声明标记：源码不含该字面即不可能有 `__tablename__ = ...` 赋值，跳过 AST 解析。
+
+表声明只能来自裸标识符赋值（`Name(id="__tablename__")`），而 `Name` 必由该字面解析而来；
+故「先看字面、再解析」与「直接解析」等价，纯属省掉绝大多数文件的 AST 开销。
+全量扫描里的表名索引是**始终全量**的（跨服务唯一性无法局部判定），这条过滤是它便宜的前提。
+"""
 
 WRITE_OPERATIONS = frozenset({"write", "ddl"})
 """跨域写判定：SQL 写操作与 DDL（D4 无例外）。"""
@@ -1298,13 +1309,18 @@ def iter_tablenames(root: Path) -> list[str]:
 def declared_tables(path: Path) -> list[tuple[int, str]]:
     """取文件内 `__tablename__` 表声明（表名小写）。
 
+    不含表声明标记的文件直接返回空表、不做 AST 解析（见 `TABLENAME_MARKER`）。
+
     Args:
         path: 源文件路径。
 
     Returns:
         list[tuple[int, str]]: 行号与表名。
     """
-    tree = ast.parse(read_text(path))
+    text = read_text(path)
+    if TABLENAME_MARKER not in text:
+        return []
+    tree = ast.parse(text)
     found: list[tuple[int, str]] = []
     for node in ast.walk(tree):
         if not isinstance(node, ast.Assign):
@@ -1351,14 +1367,19 @@ def foreign_key_target(node: ast.Call) -> str | None:
 
 
 def iter_cross_reference_tables(
-    root: Path, known_tables: tuple[str, ...], repo_root: Path
+    root: Path,
+    known_tables: tuple[str, ...],
+    repo_root: Path,
+    *,
+    files: Sequence[Path] | None = None,
 ) -> list[tuple[str, int, str, str]]:
-    """扫描包内源码的跨库表引用（原始 SQL / 外键 / 已声明表名 token）。
+    """扫描源码的跨库表引用（原始 SQL / 外键 / 已声明表名 token）。
 
     Args:
-        root: 包根目录。
+        root: 包根目录（`files` 缺省时按此递归扫描）。
         known_tables: 全仓已声明表名。
         repo_root: 仓库根（相对路径用）。
+        files: 指定扫描文件（增量模式用）；None 表示递归 `root`。
 
     Returns:
         list[tuple[str, int, str, str]]: （相对路径, 行号, 表名, 操作）。
@@ -1366,7 +1387,7 @@ def iter_cross_reference_tables(
     found: dict[tuple[str, int, str, str], None] = {}
     alternatives = "|".join(re.escape(table) for table in sorted(known_tables))
     token_re = re.compile(r"(?<![A-Za-z0-9_])(" + alternatives + r")(?![A-Za-z0-9_])") if known_tables else None
-    for path in sorted(root.rglob("*.py")):
+    for path in sorted(root.rglob("*.py")) if files is None else files:
         if "__pycache__" in path.parts or is_test_path(path, root):
             continue
         rel = rel_posix(path, repo_root)
@@ -1465,6 +1486,7 @@ class Checker:
         registry: Registry,
         *,
         update_baseline: bool = False,
+        changed: Sequence[str] | None = None,
     ) -> None:
         """初始化。
 
@@ -1473,12 +1495,14 @@ class Checker:
             rule: 规则段。
             registry: 表归属 + 服务目录视图。
             update_baseline: 是否按当前扫描结果重写域级基线。
+            changed: 增量模式的改动文件清单（相对仓根）；None 表示全量。
         """
         self.cfg = cfg
         self.rule = rule
         self.registry = registry
         self.root = cfg.root
         self.update_baseline = update_baseline
+        self.changed: frozenset[str] | None = None if changed is None else frozenset(normalize(rel) for rel in changed)
         self.outcome = Outcome(counts=dict.fromkeys(rule.counters, 0))
         self.packages: dict[str, Package] = {}
         self.layout = Layout(entries=(), shared=())
@@ -1509,6 +1533,45 @@ class Checker:
             counter: 计数键。
         """
         self.outcome.counts[counter] = self.outcome.counts.get(counter, 0) + 1
+
+    def scoped(self, rel: str) -> bool:
+        """该文件是否落在本次扫描面内（全量恒真；增量按改动清单）。
+
+        Args:
+            rel: 相对仓库根的源文件路径。
+
+        Returns:
+            bool: 需要扫描 True。
+        """
+        return self.changed is None or normalize(rel) in self.changed
+
+    def package_files(self, pkg: Package, *, skip_tests: bool) -> list[Path]:
+        """列出某包待扫描的源文件（增量模式只取改动清单内、属于该包的文件）。
+
+        **逐文件判据**（跨服务 import / 分层反向依赖 / 表声明与引用 / 跨域 import 与表引用）
+        都通过本方法取扫描面：全量时等同原来的 `rglob("*.py")`，增量时按清单裁剪，
+        两者对同一文件集合的判定完全一致。
+
+        Args:
+            pkg: 包信息。
+            skip_tests: 是否跳过包内 `tests` 目录（与各判据原有口径一致）。
+
+        Returns:
+            list[Path]: 文件清单（按路径排序）。
+        """
+        if self.changed is None:
+            candidates = sorted(pkg.path.rglob("*.py"))
+        else:
+            prefix = f"{rel_posix(pkg.path, self.root)}/"
+            candidates = [self.root / rel for rel in sorted(self.changed) if rel.startswith(prefix)]
+        picked: list[Path] = []
+        for path in candidates:
+            if "__pycache__" in path.parts or not path.is_file():
+                continue
+            if skip_tests and is_test_path(path, pkg.path):
+                continue
+            picked.append(path)
+        return picked
 
     def service_of(self, package: str) -> str:
         """包名 → 归属服务标识。
@@ -1576,6 +1639,14 @@ class Checker:
     def run(self) -> Outcome:
         """执行全部检查。
 
+        **两类判据，扫描面不同**：
+
+        - **逐文件判据**（规则 1~4、6、10 与 D1~D4）：单个文件的 AST 就足以判定，
+          增量模式只扫改动文件（判定结果与文件集合外的内容无关）；
+        - **全局判据**（表名 / 表前缀跨服务唯一、表归属登记对账、例外与归属双字段、ops 镜像闭包、
+          域文件覆盖与布局形态、域级基线陈旧）：结论依赖全仓视图，**恒全量**——
+          这类断言无法局部化，裁剪即失效（表名冲突只有看全所有声明才成立）。
+
         Returns:
             Outcome: 校验结果。
         """
@@ -1626,7 +1697,7 @@ class Checker:
         """
         for package, pkg in self.packages.items():
             layers = self.rule.layers_shared if pkg.shared else self.rule.layers_service
-            for path in sorted(pkg.path.rglob("*.py")):
+            for path in self.package_files(pkg, skip_tests=False):
                 rel = rel_posix(path, self.root)
                 source = self.subpackage(package, path)
                 for lineno, module in iter_imports(path):
@@ -1697,9 +1768,7 @@ class Checker:
         registered = self.registry.names()
         for package, pkg in self.packages.items():
             service = self.service_of(package)
-            for path in sorted(pkg.path.rglob("*.py")):
-                if "__pycache__" in path.parts or is_test_path(path, pkg.path):
-                    continue
+            for path in self.package_files(pkg, skip_tests=True):
                 rel = rel_posix(path, self.root)
                 for lineno, table in declared_tables(path):
                     if table not in registered:
@@ -1724,7 +1793,10 @@ class Checker:
         for package, pkg in self.packages.items():
             service = self.service_of(package)
             seen: set[tuple[str, int, str]] = set()
-            for rel, lineno, table, operation in iter_cross_reference_tables(pkg.path, self.known_tables, self.root):
+            files = self.package_files(pkg, skip_tests=True)
+            for rel, lineno, table, operation in iter_cross_reference_tables(
+                pkg.path, self.known_tables, self.root, files=files
+            ):
                 if any(rel.endswith(suffix) for suffix in self.rule.exempt_modules):
                     continue
                 if self.is_shared_model(rel) and (rel, table) in self.shared_declarations:
@@ -1926,6 +1998,8 @@ class Checker:
                     if "__pycache__" in path.parts:
                         continue
                     rel = rel_posix(path, self.root)
+                    if not self.scoped(rel):
+                        continue
                     for lineno, module in iter_imports(path):
                         top = module.split(".")[0]
                         if ops_package and top == ops_package:
@@ -1982,9 +2056,7 @@ class Checker:
         if not self.domain_enabled:
             return
         for package, pkg in self.packages.items():
-            for path in sorted(pkg.path.rglob("*.py")):
-                if "__pycache__" in path.parts or is_test_path(path, pkg.path):
-                    continue
+            for path in self.package_files(pkg, skip_tests=True):
                 rel = rel_posix(path, self.root)
                 source_domain = self.file_domain.get(rel)
                 if source_domain is None:
@@ -2018,10 +2090,11 @@ class Checker:
         if not self.domain_enabled:
             return
         declared_by_file: dict[str, set[str]] = {}
+        scanned: dict[Path, list[Path]] = {}
         for _package, pkg in self.packages.items():
-            for path in sorted(pkg.path.rglob("*.py")):
-                if "__pycache__" in path.parts or is_test_path(path, pkg.path):
-                    continue
+            files = self.package_files(pkg, skip_tests=True)
+            scanned[pkg.path] = files
+            for path in files:
                 rel = rel_posix(path, self.root)
                 declared = self.check_table_declarations(rel, read_text(path).splitlines())
                 if declared:
@@ -2029,7 +2102,9 @@ class Checker:
         for package, pkg in self.packages.items():
             service = self.service_of(package)
             seen: set[tuple[str, int, str]] = set()
-            for rel, lineno, table, operation in iter_cross_reference_tables(pkg.path, self.known_tables, self.root):
+            for rel, lineno, table, operation in iter_cross_reference_tables(
+                pkg.path, self.known_tables, self.root, files=scanned[pkg.path]
+            ):
                 if any(rel.endswith(suffix) for suffix in self.rule.exempt_modules):
                     continue
                 source_domain = self.file_domain.get(rel)
@@ -2210,10 +2285,14 @@ class Checker:
             self.record(f"[表归属域] {message}", "domain_ownership_violation")
 
     def finish_domain_baseline(self) -> None:
-        """基线与双字段收尾：陈旧基线条目即失败；`--update-baseline` 时重写基线。"""
+        """基线与双字段收尾：陈旧基线条目即失败；`--update-baseline` 时重写基线。
+
+        增量模式只判**扫描面内文件**的陈旧条目：未扫文件本轮未命中是必然的（不是「已修复」），
+        一并判陈旧会把全量口径的结论误报成失败。已删除文件仍在清单内，故其条目照常判陈旧。
+        """
         if not self.domain_enabled:
             return
-        stale = [key for key, used in self.baseline.items() if not used]
+        stale = [key for key, used in self.baseline.items() if not used and self.scoped(key[3])]
         if self.update_baseline:
             merged = [
                 BaselineEntry(kind=key[0], domain=key[1], target=key[2], file=key[3], fingerprint=key[4])
@@ -2338,6 +2417,7 @@ def check(
     *,
     registry: Registry | None = None,
     update_baseline: bool = False,
+    changed: Sequence[str] | None = None,
 ) -> Outcome:
     """执行全部检查（登记源可注入，供自检使用）。
 
@@ -2346,12 +2426,13 @@ def check(
         rule: 规则段。
         registry: 表归属视图（缺省从登记源解析）。
         update_baseline: 是否按当前扫描结果重写域级基线。
+        changed: 增量模式的改动文件清单（相对仓根）；None 表示全量。
 
     Returns:
         Outcome: 校验结果。
     """
     view = registry if registry is not None else load_registry(cfg, rule)
-    return Checker(cfg, rule, view, update_baseline=update_baseline).run()
+    return Checker(cfg, rule, view, update_baseline=update_baseline, changed=changed).run()
 
 
 def emit(outcome: Outcome, *, as_json: bool) -> None:
@@ -2395,17 +2476,149 @@ def emit(outcome: Outcome, *, as_json: bool) -> None:
     )
 
 
-def run(cfg: Config, *, json_output: bool, update_baseline: bool, as_self_test: bool) -> int:
-    """执行服务边界校验。
+# ---------- 增量扫描 ----------
+
+
+@lru_cache(maxsize=64)
+def glob_regex(pattern: str) -> str:
+    """把仓侧 glob 编译成正则（`**` 跨目录、`*` 不跨目录、`?` 单字符）。
+
+    Args:
+        pattern: glob 模式（`/` 分隔）。
+
+    Returns:
+        str: 可用于 `re.fullmatch` 的正则。
+    """
+    parts: list[str] = []
+    index = 0
+    while index < len(pattern):
+        char = pattern[index]
+        if char == "*":
+            if pattern.startswith("**/", index):
+                parts.append("(?:.*/)?")
+                index += 3
+                continue
+            if pattern.startswith("**", index):
+                parts.append(".*")
+                index += 2
+                continue
+            parts.append("[^/]*")
+            index += 1
+            continue
+        if char == "?":
+            parts.append("[^/]")
+            index += 1
+            continue
+        parts.append(re.escape(char))
+        index += 1
+    return "".join(parts)
+
+
+def matches_glob(pattern: str, rel: str) -> bool:
+    """相对路径是否命中 glob 模式。
+
+    Args:
+        pattern: glob 模式。
+        rel: 相对仓根路径（`/` 分隔）。
+
+    Returns:
+        bool: 命中 True。
+    """
+    return re.fullmatch(glob_regex(pattern), normalize(rel)) is not None
+
+
+def rule_trigger_of(rule: ServiceBoundariesRules, rel: str) -> str | None:
+    """改动是否触碰「判据自身的数据源」（布局 / 基线 / 例外 / 归属登记 / 目录登记）。
+
+    这些文件一变，**未改动文件**的判定结论也可能跟着变（例如域布局新增路径后，原本无归属的文件
+    变成有归属；表归属登记改归属后，另一服务的声明从合法变越权），故必须升为全量。
+
+    Args:
+        rule: 规则段。
+        rel: 相对仓根路径。
+
+    Returns:
+        str | None: 命中项的中文名；未命中返回 None。
+    """
+    path = normalize(rel)
+    for declared, label in (
+        (rule.layout, "域布局"),
+        (rule.baseline, "域级基线"),
+        (rule.exceptions, "读侧例外"),
+    ):
+        if declared and normalize(declared) == path:
+            return label
+    stem = Path(path).stem
+    for module, label in ((rule.ownership_module, "表归属登记"), (rule.catalog_module, "服务目录登记")):
+        # 登记源既可能是点分模块名（`<pkg>.services.table_registry`），也可能是相对路径
+        # （`pkg/tables.py`）；两种形态都归一成「末段名」再比对，宁可多触发全量也不漏。
+        if not module:
+            continue
+        last = Path(module).stem if module.endswith(".py") else module.rsplit(".", 1)[-1]
+        if last == stem:
+            return label
+    return None
+
+
+def full_scan_reason(cfg: Config, rule: ServiceBoundariesRules, changed: Sequence[str]) -> str | None:
+    """判断增量清单是否必须升为全量扫描。
+
+    三条触发：①清单内有已删除文件（结构变化）；②触碰判据数据源（见 `rule_trigger_of`）；
+    ③命中仓侧 `incremental_full_when`（补足仓特有的生成物与清单目录）。
+
+    Args:
+        cfg: 仓配置。
+        rule: 规则段。
+        changed: 改动文件清单。
+
+    Returns:
+        str | None: 升级原因；None 表示可按增量执行。
+    """
+    for rel in changed:
+        if not (cfg.root / rel).is_file():
+            return f"清单内文件已删除或不在工作树：{rel}"
+        label = rule_trigger_of(rule, rel)
+        if label is not None:
+            return f"改动触碰{label}：{rel}"
+        for pattern in rule.incremental_full_when:
+            if matches_glob(pattern, rel):
+                return f"改动命中全量触发面「{pattern}」：{rel}"
+    return None
+
+
+def read_changed(cfg: Config, files_from: str) -> list[str] | None:
+    """读取增量清单（空串表示全量，返回 None；不可读返回 None 并由调用方判为参数错误）。
+
+    Args:
+        cfg: 仓配置。
+        files_from: 清单路径（可为相对仓根）。
+
+    Returns:
+        list[str] | None: 改动文件清单；全量模式返回 None。
+    """
+    if not files_from:
+        return None
+    path = Path(files_from)
+    if not path.is_absolute():
+        path = cfg.root / files_from
+    return read_file_list(path)
+
+
+def run(cfg: Config, *, json_output: bool, update_baseline: bool, as_self_test: bool, files_from: str = "") -> int:
+    """执行服务边界校验（可限定为改动文件清单 = 增量模式）。
+
+    增量只作用于**逐文件判据**；全局判据（跨服务表名 / 前缀唯一、归属登记对账、ops 镜像闭包、
+    域文件覆盖与布局形态、基线陈旧）恒全量。三条触发会把整个校验升为全量，见 `full_scan_reason`。
 
     Args:
         cfg: 仓配置。
         json_output: 是否 JSON 输出。
-        update_baseline: 是否按当前扫描结果重写域级基线。
+        update_baseline: 是否按当前扫描结果重写域级基线（**不得与增量同时使用**）。
         as_self_test: 是否只跑内置自检。
+        files_from: 改动文件清单路径；空串表示全量。
 
     Returns:
-        int: 退出码（0 通过 / 1 违规或登记源不可解析 / 2 规则未登记或登记源缺失）。
+        int: 退出码（0 通过 / 1 违规或登记源不可解析 / 2 规则未登记、登记源缺失或参数冲突）。
     """
     try:
         rule = require(cfg.boundaries_rules, "service_boundaries", MIN_KEYS)
@@ -2414,14 +2627,33 @@ def run(cfg: Config, *, json_output: bool, update_baseline: bool, as_self_test: 
         return 2
     if as_self_test:
         return self_test()
+    if update_baseline and files_from:
+        out("[check_service_boundaries] 基线必须按全量重写：`--update-baseline` 不接受增量清单")
+        return 2
+    changed: Sequence[str] | None = None
+    if files_from:
+        listed = read_changed(cfg, files_from)
+        if listed is None:
+            return 2
+        reason = full_scan_reason(cfg, rule, listed)
+        if reason is not None:
+            out(f"[check_service_boundaries] 升为全量：{reason}")
+        else:
+            changed = listed
+            out(
+                f"[check_service_boundaries] 增量模式：{len(listed)} 个改动文件（逐文件判据）；"
+                "全局判据（表名唯一 / 归属对账 / 镜像闭包 / 域覆盖 / 基线陈旧）恒全量"
+            )
     try:
-        outcome = check(cfg, rule, update_baseline=update_baseline)
+        outcome = check(cfg, rule, update_baseline=update_baseline, changed=changed)
     except RulesError as exc:
         out(f"[check_service_boundaries] {exc}")
         return 2
     except RegistryError as exc:
         out(f"[check_service_boundaries] {exc}")
         return 1
+    if changed is not None:
+        outcome.counts["incremental_files"] = len(changed)
     emit(outcome, as_json=json_output)
     return 1 if outcome.problems else 0
 
