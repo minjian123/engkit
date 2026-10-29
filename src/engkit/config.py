@@ -667,6 +667,8 @@ class ServiceBoundariesRules:
         incremental_full_when: 增量扫描升为全量的路径 glob（生成物 / 清单目录等仓特有触发面；
             布局 / 基线 / 例外 / 归属登记 / 目录登记由规则字段自身推出，不必在此重复）。
         table_index_cache: 表声明索引缓存文件（相对仓根）；空串表示不落盘（每次现扫）。
+        public_export_baseline: 域公共出口白名单与递减基线 JSON（相对仓根）；
+            空串表示停用出口断言（产品仓未按域分包时）。
     """
 
     shared_groups: tuple[str, ...]
@@ -699,6 +701,7 @@ class ServiceBoundariesRules:
     shared_table_prefixes: tuple[str, ...] = ()
     incremental_full_when: tuple[str, ...] = ()
     table_index_cache: str = ""
+    public_export_baseline: str = ""
 
 
 @dataclass(frozen=True)
@@ -1639,6 +1642,7 @@ def _parse_boundaries_rules(table: dict[str, Any], where: str) -> ServiceBoundar
             "shared_table_prefixes",
             "incremental_full_when",
             "table_index_cache",
+            "public_export_baseline",
         ),
         where,
     )
@@ -1685,6 +1689,7 @@ def _parse_boundaries_rules(table: dict[str, Any], where: str) -> ServiceBoundar
         shared_table_prefixes=_strings(table, "shared_table_prefixes", where),
         incremental_full_when=_strings(table, "incremental_full_when", where),
         table_index_cache=_string(table, "table_index_cache", where, ""),
+        public_export_baseline=_string(table, "public_export_baseline", where, ""),
     )
 
 

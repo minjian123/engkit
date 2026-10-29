@@ -18,6 +18,8 @@
 
 - D1 跨域 import 禁止；D2 跨域只经公共面（目标为源域 `public_api` 出口时放行）；
 - D3 跨域表引用禁止（读侧例外可放行）；D4 跨域写禁止（无例外）；
+- D6 出口导出面：域公共出口只交不可变 DTO 与领域服务接口，不得导出 ORM 模型 / 仓储 / API 层函数
+  （`__all__` 与顶层绑定双向判定；例外白名单 + 递减基线，**条目只减不增**）；
 - 另有：域布局完整性（路径重复归属 / 未命中文件 / 未登记的域实现）、表归属双字段一致
   （`owner` == 域承载服务、基础设施表与不归域表 `domain` 恒空）、存量跨域引用基线（**只减不增**）。
 
@@ -76,6 +78,20 @@ PLANNED = "planned"
 
 BASELINE_VERSION = 1
 """域级基线文件格式版本（输出契约，不是仓数据）。"""
+
+PUBLIC_EXPORT_VERSION = 1
+"""出口白名单文件格式版本（与域级基线各自独立演进）。"""
+
+PUBLIC_EXPORT_KINDS = ("orm", "repository", "api_layer", "service_impl")
+"""出口违规种类：ORM 模型 / 仓储 / API 层函数 / 域内服务与策略实现类（判定依据是导出符号的来源模块）。"""
+
+PUBLIC_EXPORT_LABELS = {
+    "orm": "ORM 模型",
+    "repository": "仓储",
+    "api_layer": "API 层函数",
+    "service_impl": "域内实现类",
+}
+"""出口违规种类的中文名（违规文案用）。"""
 
 
 class RegistryError(RuntimeError):
@@ -1080,6 +1096,149 @@ def dump_baseline(path: Path, entries: tuple[BaselineEntry, ...]) -> int:
     return len(ordered)
 
 
+@dataclass(frozen=True)
+class PublicExportEntry:
+    """一条出口白名单（该符号允许从域公共出口导出）。
+
+    Attributes:
+        domain: 业务域标识。
+        symbol: 导出符号名。
+        kind: 例外种类（如 `constant` / `capability_plugin`，仅用于分类与说明，不参与匹配）。
+        reason: 放行理由（必填）。
+        owner: 收口归口（必填，指向承接的机制 / 任务）。
+    """
+
+    domain: str
+    symbol: str
+    kind: str
+    reason: str
+    owner: str
+
+
+@dataclass(frozen=True)
+class PublicExport:
+    """域公共出口的一条导出绑定。
+
+    Attributes:
+        symbol: 绑定名（`from x import y as z` 取 `z`）。
+        source: 来源模块（模块内自定义时为空串）。
+        lineno: 行号。
+    """
+
+    symbol: str
+    source: str
+    lineno: int
+
+
+def load_public_exports(path: Path) -> tuple[PublicExportEntry, ...]:
+    """载入出口白名单（缺文件返回空）。
+
+    Args:
+        path: 白名单文件路径。
+
+    Returns:
+        tuple[PublicExportEntry, ...]: 白名单条目。
+
+    Raises:
+        ValueError: JSON 非法 / 版本非法 / 条目非法（缺字段 / 同域同符号重复登记）。
+    """
+    data = _read_json_object(path, "出口白名单")
+    if data is None:
+        return ()
+    if data.get("version") != PUBLIC_EXPORT_VERSION:
+        raise ValueError(f"出口白名单版本非法（应为 {PUBLIC_EXPORT_VERSION}）")
+    raw = data.get("entries")
+    if not isinstance(raw, list):
+        raise ValueError("出口白名单 entries 须为数组")
+    entries: list[PublicExportEntry] = []
+    seen: set[tuple[str, str]] = set()
+    for index, item in enumerate(raw, start=1):
+        if not isinstance(item, dict):
+            raise ValueError(f"出口白名单第 {index} 条须为对象")
+        fields = {str(key): value for key, value in item.items()}
+        entry = PublicExportEntry(
+            domain=_text_value(fields, "domain"),
+            symbol=_text_value(fields, "symbol"),
+            kind=_text_value(fields, "kind"),
+            reason=_text_value(fields, "reason"),
+            owner=_text_value(fields, "owner"),
+        )
+        key = (entry.domain, entry.symbol)
+        if key in seen:
+            raise ValueError(f"出口白名单重复登记：{entry.domain} / {entry.symbol}")
+        seen.add(key)
+        entries.append(entry)
+    return tuple(entries)
+
+
+def string_items(value: ast.expr | None) -> list[str]:
+    """取 `__all__` 右值的字符串元素（非 list / tuple 字面量返回空）。
+
+    Args:
+        value: 右值表达式。
+
+    Returns:
+        list[str]: 字符串元素（声明序）。
+    """
+    if not isinstance(value, (ast.List, ast.Tuple)):
+        return []
+    items: list[str] = []
+    for element in value.elts:
+        if isinstance(element, ast.Constant) and isinstance(element.value, str):
+            items.append(element.value)
+    return items
+
+
+def public_exports_of(tree: ast.Module) -> tuple[tuple[str, ...], tuple[PublicExport, ...]]:
+    """取模块导出面：`__all__` 声明 + 顶层绑定（`public.<name>` 同样可达，故一并计入）。
+
+    顶层绑定是「能取到什么」的完整答案：`from … import SysRole` 即便不写进 `__all__`，
+    跨域仍可 `public.SysRole` 访问；只判 `__all__` 等于留后门。
+
+    Args:
+        tree: 模块语法树。
+
+    Returns:
+        tuple[tuple[str, ...], tuple[PublicExport, ...]]: （`__all__` 名清单, 顶层绑定）。
+    """
+    declared: list[str] = []
+    exports: list[PublicExport] = []
+    seen: set[str] = set()
+
+    def add(symbol: str, source: str, lineno: int) -> None:
+        if not symbol or symbol.startswith("_") or symbol in seen:
+            return
+        seen.add(symbol)
+        exports.append(PublicExport(symbol=symbol, source=source, lineno=lineno))
+
+    for node in tree.body:
+        if isinstance(node, ast.ImportFrom):
+            source = node.module or ""
+            if source == "__future__":
+                continue
+            for alias in node.names:
+                if alias.name == "*":
+                    continue
+                add(alias.asname or alias.name, source, node.lineno)
+            continue
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                add(alias.asname or alias.name.split(".")[0], alias.name, node.lineno)
+            continue
+        if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+            add(node.name, "", node.lineno)
+            continue
+        if isinstance(node, ast.AugAssign) and isinstance(node.target, ast.Name) and node.target.id == "__all__":
+            declared.extend(string_items(node.value))
+            continue
+        name, value = assignment_of(node)
+        if name == "__all__":
+            declared.extend(string_items(value))
+        elif name is not None:
+            add(name, "", node.lineno)
+    return tuple(dict.fromkeys(declared)), tuple(exports)
+
+
 def load_exceptions(path: Path) -> tuple[OwnershipException, ...]:
     """载入例外白名单（缺文件返回空）。
 
@@ -1489,6 +1648,8 @@ class Checker:
         self.domain_enabled = False
         self.baseline: dict[tuple[str, str, str, str, str], bool] = {}
         self.pending: list[BaselineEntry] = []
+        self.public_exports: dict[tuple[str, str], bool] = {}
+        """出口白名单：键 `(域, 符号)` → 是否命中（不命中即陈旧，只减不增）。"""
         self.exceptions: tuple[OwnershipException, ...] = ()
         self.known_tables: tuple[str, ...] = ()
         self.shared_declarations: set[tuple[str, str]] = set()
@@ -1632,6 +1793,7 @@ class Checker:
         self.packages = discover_packages(self.cfg, self.rule)
         names = set(self.packages)
         self.load_domain_state()
+        self.load_public_export_state()
         self.check_imports(names)
         self.check_tables()
         self.load_exceptions_state()
@@ -1643,7 +1805,9 @@ class Checker:
         self.check_domain_tables()
         self.check_domain_files()
         self.check_domain_layout_shape()
+        self.check_public_exports()
         self.check_domain_ownership()
+        self.finish_public_exports()
         self.finish_domain_baseline()
         self.tables.save(prune=self.changed is None)
         return self.outcome
@@ -1676,6 +1840,20 @@ class Checker:
                     "（域与域外声明展开后重叠，须收窄其中一侧）",
                     "domain_layout_violation",
                 )
+
+    def load_public_export_state(self) -> None:
+        """载入出口白名单（未配置路径即停用 D6，产品仓未按域分包时用）。"""
+        declared = self.rule.public_export_baseline
+        if not declared:
+            self.public_exports = {}
+            return
+        try:
+            entries = load_public_exports(self.root / declared)
+        except ValueError as exc:
+            self.record(f"[出口白名单] {exc}", "domain_layout_violation")
+            entries = ()
+        self.outcome.counts["public_export_exempt_total"] = len(entries)
+        self.public_exports = {(entry.domain, entry.symbol): False for entry in entries}
 
     def check_imports(self, names: set[str]) -> None:
         """规则 1 ~ 4：跨服务依赖、分层反向依赖、跨包私有引用。
@@ -2284,6 +2462,108 @@ class Checker:
         except (OSError, SyntaxError):
             return False
 
+    def package_relative(self, rel: str) -> tuple[str, bool] | None:
+        """取（相对所属包根的路径, 是否共享库包）；不在任何包内返回 None。
+
+        目录判定必须落在**包内相对路径**上：仓根路径里自带 `services/` 段（服务分组目录），
+        直接匹配会把任何服务文件都判成「域内实现类」。
+
+        Args:
+            rel: 相对仓根 posix 路径。
+
+        Returns:
+            tuple[str, bool] | None: （包内路径, 是否共享库包）。
+        """
+        for pkg in self.packages.values():
+            prefix = f"{rel_posix(pkg.path, self.root)}/"
+            if rel.startswith(prefix):
+                return rel[len(prefix) :], pkg.shared
+        return None
+
+    def public_export_kind_of(self, rel: str) -> str | None:
+        """判定导出符号的来源文件属于哪类违规（合规来源返回 None）。
+
+        Args:
+            rel: 来源文件（相对仓根 posix）。
+
+        Returns:
+            str | None: 违规种类（`orm` / `repository` / `api_layer` / `service_impl`）。
+        """
+        if self.is_model_module(rel):
+            return "orm"
+        located = self.package_relative(rel)
+        if located is None:
+            return None
+        inner, shared = located
+        if shared:
+            # 共享库包只判模型：库里的能力接口（如权限字段 provider 基类）不属「域内实现类」
+            return None
+        posix = f"/{inner}"
+        if "/repositories/" in posix:
+            return "repository"
+        if "/api/" in posix:
+            return "api_layer"
+        if "/services/" in posix or "/permission/" in posix:
+            return "service_impl"
+        return None
+
+    def check_public_exports(self) -> None:
+        """D6 出口导出面：`__all__` 与顶层绑定双向判定，来源为模型 / 仓储 / api / 域内实现即违规。
+
+        **恒全量**：导出面是整文件结论，白名单陈旧判定也要看全所有域，按改动清单裁剪即失效。
+        """
+        if not self.rule.public_export_baseline or not self.domain_enabled:
+            return
+        for entry in self.layout.entries:
+            if len(entry.public_api) != 1:
+                continue
+            module = entry.public_api[0]
+            rel = module_file_of(module, self.packages, self.root)
+            if rel is None:
+                continue
+            tree = ast.parse(read_text(self.root / rel))
+            declared, exports = public_exports_of(tree)
+            bound = {item.symbol for item in exports}
+            for symbol in declared:
+                if symbol in bound:
+                    continue
+                self.record(
+                    f"[出口导出面] {rel} 的 __all__ 声明 {symbol} 但模块内无该绑定（声明与实现对不上）",
+                    "public_export_violation",
+                )
+            for item in exports:
+                if not item.source:
+                    continue
+                source_rel = module_file_of(item.source, self.packages, self.root)
+                if source_rel is None:
+                    continue
+                kind = self.public_export_kind_of(source_rel)
+                if kind is None:
+                    continue
+                if (entry.domain_key, item.symbol) in self.public_exports:
+                    self.public_exports[(entry.domain_key, item.symbol)] = True
+                    self.bump("public_export_exempt_used")
+                    continue
+                self.record(
+                    f"[出口导出面] {rel}:{item.lineno} {entry.domain_key} 导出"
+                    f"{PUBLIC_EXPORT_LABELS[kind]}：{item.symbol}（来源 {item.source}）"
+                    "——域公共出口只交不可变 DTO 与领域服务接口",
+                    "public_export_violation",
+                )
+
+    def finish_public_exports(self) -> None:
+        """出口白名单陈旧条目即失败（只减不增，与域级基线同口径）。"""
+        if not self.rule.public_export_baseline:
+            return
+        for (domain, symbol), used in self.public_exports.items():
+            if used:
+                continue
+            self.record(
+                f"[出口白名单陈旧] {domain} / {symbol} 已不再命中，"
+                "白名单只减不增，请从出口白名单文件删除该条",
+                "domain_layout_violation",
+            )
+
     def check_domain_ownership(self) -> None:
         """表归属双字段一致性（`owner` == 域承载服务；基础设施表与不归域表 `domain` 恒空）。"""
         domain_services = self.layout.domain_services() if self.domain_enabled else None
@@ -2482,6 +2762,13 @@ def emit(outcome: Outcome, *, as_json: bool) -> None:
         f"域级基线 {outcome.counts.get('domain_baseline_total', 0)} 条"
         f"（命中 {outcome.counts.get('domain_baseline_used', 0)} 条）。"
     )
+    export_total = outcome.counts.get("public_export_exempt_total", 0)
+    export_used = outcome.counts.get("public_export_exempt_used", 0)
+    if export_total or export_used or outcome.counts.get("public_export_violation", 0):
+        out(
+            f"  出口导出面：违规 {outcome.counts.get('public_export_violation', 0)} 处；"
+            f"白名单登记 {export_total} 条（命中 {export_used} 条）。"
+        )
 
 
 # ---------- 增量扫描 ----------
@@ -2553,6 +2840,7 @@ def rule_trigger_of(rule: ServiceBoundariesRules, rel: str) -> str | None:
         (rule.layout, "域布局"),
         (rule.baseline, "域级基线"),
         (rule.exceptions, "读侧例外"),
+        (rule.public_export_baseline, "出口白名单"),
     ):
         if declared and normalize(declared) == path:
             return label
@@ -2744,6 +3032,9 @@ SAMPLE_COUNTERS = (
     "domain_baseline_used",
     "domain_files_registered",
     "domain_files_unregistered",
+    "public_export_violation",
+    "public_export_exempt_total",
+    "public_export_exempt_used",
 )
 """自检夹具的计数键（与仓配置 `counters` 同口径）。"""
 
@@ -2783,6 +3074,7 @@ def sample_rule() -> ServiceBoundariesRules:
         shared_lib_service="platform",
         domain_subdir="domains",
         shared_table_prefixes=("sys_",),
+        public_export_baseline="deploy/boundaries/domain_public_export_baseline.json",
     )
 
 
@@ -3166,6 +3458,66 @@ def self_test() -> int:
         written = json.loads((root / sample.baseline).read_text(encoding="utf-8"))
         expect(bool(written["entries"]), "--update-baseline 把存量跨域引用写回基线")
         expect(not scan().problems, "基线写回后复扫通过")
+        # ---- D6 出口导出面 ----
+        public_file = "pkg/services/alpha/src/alpha/domains/alpha/public.py"
+        export_baseline = sample.public_export_baseline
+        write_files(
+            root,
+            {
+                "pkg/services/alpha/src/alpha/domains/alpha/dto.py": "VALUE = 0\n",
+                "pkg/services/alpha/src/alpha/domains/alpha/models.py": '__tablename__ = "sys_alpha"\n',
+                "pkg/services/alpha/src/alpha/domains/alpha/repositories/__init__.py": "",
+                "pkg/services/alpha/src/alpha/domains/alpha/repositories/repo.py": "VALUE = 0\n",
+                "pkg/services/alpha/src/alpha/domains/alpha/services/__init__.py": "",
+                "pkg/services/alpha/src/alpha/domains/alpha/services/impl.py": "VALUE = 0\n",
+                "pkg/services/alpha/src/alpha/domains/alpha/api/helper.py": "VALUE = 0\n",
+            },
+        )
+        export_ok = "from alpha.domains.alpha.dto import VALUE as VALUE\n" '__all__ = ["VALUE"]\n'
+        write_files(root, {public_file: export_ok})
+        expect(not scan().problems, "出口只导出 DTO 放行（D6 正例）")
+
+        for title, source in (
+            ("ORM 模型", "from alpha.domains.alpha.models import SysThing as SysThing\n"),
+            ("仓储", "from alpha.domains.alpha.repositories.repo import ThingRepo as ThingRepo\n"),
+            ("API 层函数", "from alpha.domains.alpha.api.helper import build as build\n"),
+            ("域内实现类", "from alpha.domains.alpha.services.impl import AlphaService as AlphaService\n"),
+        ):
+            symbol = source.split(" import ", 1)[1].split(" as ")[0]
+            write_files(root, {public_file: source + f'__all__ = ["{symbol}"]\n'})
+            expect(counter(scan(), "public_export_violation") >= 1, f"出口导出{title}拦截（D6 反例）")
+
+        write_files(root, {public_file: 'VALUE = 0\n__all__ = ["Ghost"]\n'})
+        expect(counter(scan(), "public_export_violation") >= 1, "__all__ 声明与模块绑定不一致拦截（D6 双向）")
+
+        write_files(
+            root,
+            {
+                public_file: "from alpha.domains.alpha.models import SysThing as SysThing\n",
+                export_baseline: json.dumps(
+                    {
+                        "version": 1,
+                        "entries": [
+                            {
+                                "domain": "alpha",
+                                "symbol": "SysThing",
+                                "kind": "constant",
+                                "reason": "自检夹具",
+                                "owner": "自检夹具",
+                            }
+                        ],
+                    }
+                ),
+            },
+        )
+        allowcased = scan()
+        expect(not allowcased.problems, "出口白名单放行命中条目（D6 白名单）")
+        expect(counter(allowcased, "public_export_exempt_used") == 1, "出口白名单命中计数")
+
+        write_files(root, {public_file: export_ok})
+        expect(counter(scan(), "domain_layout_violation") >= 1, "出口白名单陈旧条目拦截（只减不增）")
+        write_files(root, {export_baseline: json.dumps({"version": 1, "entries": []})})
+
         emit(Outcome(counts=dict.fromkeys(SAMPLE_COUNTERS, 0)), as_json=True)
         emit(Outcome(counts=dict.fromkeys(SAMPLE_COUNTERS, 0)), as_json=False)
         emit(Outcome(problems=["样例"], counts=dict.fromkeys(SAMPLE_COUNTERS, 0)), as_json=False)
