@@ -19,6 +19,7 @@ from typing import NamedTuple
 from ..config import BareCollectionsRules, Config, parse
 from ..console import out
 from .rules import RulesError, require
+from .scan_scope import read_file_list, select_files
 
 MIN_KEYS = ("scan_targets", "whitelist", "baseline")
 """未登记时报错给出的最小键指引。"""
@@ -210,18 +211,33 @@ def _excluded(path: Path, root: Path, rule: BareCollectionsRules) -> bool:
     return any(part in rule.exclude_parts for part in path.relative_to(root).parts)
 
 
-def iter_target_files(cfg: Config, rule: BareCollectionsRules) -> list[Path]:
-    """枚举扫描目标下的 Python 文件。
+def iter_target_files(cfg: Config, rule: BareCollectionsRules, *, changed: list[str] | None = None) -> list[Path]:
+    """枚举扫描目标下的 Python 文件（给了 `changed` 时只取清单内的文件）。
 
     `[backend].groups` 下的服务目录按其「源码 + 测试」两个子目录展开；其余目标整体递归。
+
+    增量模式（`changed` 非 None）：只取清单内、落在 `scan_targets` 之下的现存 `.py`。
+    本护栏的规则是**文件局部**的（单文件 AST，不跨文件），故增量与全量的新增判定等价，
+    差别只在扫描面——这正是开发环能按改动文件跑它的前提。
 
     Args:
         cfg: 仓配置。
         rule: 规则段。
+        changed: 增量模式的改动文件清单（相对仓根）；None 表示全量。
 
     Returns:
-        list[Path]: 文件清单（按发现序）。
+        list[Path]: 文件清单（按发现序；增量模式保持清单顺序）。
     """
+    if changed is not None:
+        targets = tuple(rel.rstrip("/") for rel in rule.scan_targets)
+        selected: list[Path] = []
+        for path in select_files(cfg.root, changed):
+            if path.suffix != ".py" or _excluded(path, cfg.root, rule):
+                continue
+            rel = path.relative_to(cfg.root).as_posix()
+            if any(rel == target or rel.startswith(f"{target}/") for target in targets):
+                selected.append(path)
+        return selected
     files: list[Path] = []
     seen: set[Path] = set()
 
@@ -295,20 +311,27 @@ def scan_source(rel: str, source: str, rule: BareCollectionsRules) -> list[Hit]:
     return hits
 
 
-def collect(cfg: Config, rule: BareCollectionsRules, outcome: Outcome) -> list[Hit]:
+def collect(
+    cfg: Config,
+    rule: BareCollectionsRules,
+    outcome: Outcome,
+    *,
+    changed: list[str] | None = None,
+) -> list[Hit]:
     """扫描目标文件，收集命中（扫描异常记入 `outcome.problems`）。
 
     Args:
         cfg: 仓配置。
         rule: 规则段。
         outcome: 结果累积器。
+        changed: 增量模式的改动文件清单；None 表示全量。
 
     Returns:
         list[Hit]: 命中清单。
     """
     hits: list[Hit] = []
     implementation = set(rule.implementation_files)
-    for path in iter_target_files(cfg, rule):
+    for path in iter_target_files(cfg, rule, changed=changed):
         rel = path.relative_to(cfg.root).as_posix()
         if rel in implementation:
             continue
@@ -446,18 +469,35 @@ def _positions(hits: list[Hit]) -> dict[tuple[str, str, str], str]:
     return positions
 
 
-def check(cfg: Config, rule: BareCollectionsRules) -> Outcome:
+def _in_scope(rel: str, changed: list[str] | None) -> bool:
+    """基线条目是否落在本次比对范围内（全量恒真；增量按改动清单，含已删除文件）。
+
+    Args:
+        rel: 基线条目的相对路径。
+        changed: 增量清单；None 表示全量。
+
+    Returns:
+        bool: 参与本次 `stale` 统计返回 True。
+    """
+    return True if changed is None else rel in set(changed)
+
+
+def check(cfg: Config, rule: BareCollectionsRules, *, changed: list[str] | None = None) -> Outcome:
     """执行护栏：扫描 → 基线比对 → 问题清单。
+
+    增量模式只比对**清单内文件**的基线条目：未改动文件不会因本次改动新增违规，故新增判定与全量等价；
+    `stale`（已修复但仍留在基线）也只统计已扫文件，避免把未扫文件误报成「可递减」。
 
     Args:
         cfg: 仓配置。
         rule: 规则段。
+        changed: 增量模式的改动文件清单；None 表示全量。
 
     Returns:
         Outcome: 结果。
     """
     outcome = Outcome()
-    hits = collect(cfg, rule, outcome)
+    hits = collect(cfg, rule, outcome, changed=changed)
     summarize(hits, outcome)
     actual = tally([baseline_key(hit) for hit in hits])
     positions = _positions(hits)
@@ -472,7 +512,9 @@ def check(cfg: Config, rule: BareCollectionsRules) -> Outcome:
         extra = count - baseline.get(key, 0)
         if extra > 0:
             added[key] = extra
-    stale_total = sum(max(0, count - actual.get(key, 0)) for key, count in baseline.items())
+    stale_total = sum(
+        max(0, count - actual.get(key, 0)) for key, count in baseline.items() if _in_scope(key[0], changed)
+    )
     outcome.counts["baseline_entries"] = sum(baseline.values())
     outcome.counts["added"] = sum(added.values())
     outcome.counts["stale"] = stale_total
@@ -776,18 +818,51 @@ def _mini_cfg(root: Path) -> Config:
     )
 
 
-def run(cfg: Config, *, json_output: bool, report_mode: bool, update_baseline: bool, as_self_test: bool) -> int:
-    """执行集合声明校验。
+def _read_changed(cfg: Config, files_from: str) -> list[str] | None:
+    """读取增量清单（空串表示全量）。
+
+    Args:
+        cfg: 仓配置。
+        files_from: 清单路径（可为相对仓根）。
+
+    Returns:
+        list[str] | None: 改动文件清单；全量模式返回 None；清单不可读返回空表由调用方转退出码。
+
+    Raises:
+        SystemExit: 清单不可读（退出码 2，避免「清单丢了还当全量跑」）。
+    """
+    if not files_from:
+        return None
+    path = Path(files_from)
+    if not path.is_absolute():
+        path = cfg.root / files_from
+    listed = read_file_list(path)
+    if listed is None:
+        raise SystemExit(2)
+    return listed
+
+
+def run(
+    cfg: Config,
+    *,
+    json_output: bool,
+    report_mode: bool,
+    update_baseline: bool,
+    as_self_test: bool,
+    files_from: str = "",
+) -> int:
+    """执行集合声明校验（可限定为改动文件清单 = 增量模式）。
 
     Args:
         cfg: 仓配置。
         json_output: 是否 JSON 输出。
         report_mode: 是否只出统计报告。
-        update_baseline: 是否按当前扫描结果重写基线。
+        update_baseline: 是否按当前扫描结果重写基线（不得与增量模式同时使用）。
         as_self_test: 是否只跑内置自检。
+        files_from: 改动文件清单路径（一行一个相对仓根路径）；空串表示全量。
 
     Returns:
-        int: 退出码（0 通过 / 1 有新增违规 / 2 规则或基线缺失）。
+        int: 退出码（0 通过 / 1 有新增违规 / 2 规则缺失或参数冲突）。
     """
     try:
         rule = require(cfg.collections_rules, "bare_collections", MIN_KEYS)
@@ -796,6 +871,13 @@ def run(cfg: Config, *, json_output: bool, report_mode: bool, update_baseline: b
         return 2
     if as_self_test:
         return self_test(rule)
+    try:
+        changed = _read_changed(cfg, files_from)
+    except SystemExit:
+        return 2
+    if update_baseline and changed is not None:
+        out("[check_bare_collections] 基线必须按全量重写：`--update-baseline` 不接受增量清单")
+        return 2
     if update_baseline:
         outcome = Outcome()
         hits = collect(cfg, rule, outcome)
@@ -805,6 +887,8 @@ def run(cfg: Config, *, json_output: bool, report_mode: bool, update_baseline: b
     if report_mode:
         report(cfg, rule, as_json=json_output)
         return 0
-    outcome = check(cfg, rule)
+    if changed is not None:
+        out(f"[check_bare_collections] 增量模式：只扫 {len(changed)} 个改动文件")
+    outcome = check(cfg, rule, changed=changed)
     emit(outcome, as_json=json_output)
     return 1 if outcome.problems else 0

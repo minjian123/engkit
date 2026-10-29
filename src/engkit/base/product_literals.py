@@ -23,6 +23,7 @@ from ..config import Config, ProductLiteralsRules, parse
 from ..console import out
 from ..gitutil import read_at
 from .rules import RulesError, require
+from .scan_scope import read_file_list, select_files
 
 MIN_KEYS = ("deny_globs", "literals")
 """未登记时报错给出的最小键指引。"""
@@ -315,16 +316,29 @@ def fingerprint(text: str) -> str:
     return hashlib.sha256(normalize_line(text).encode("utf-8")).hexdigest()[:16]
 
 
-def iter_target_files(cfg: Config, rule: ProductLiteralsRules) -> list[Path]:
+def iter_target_files(cfg: Config, rule: ProductLiteralsRules, *, changed: list[str] | None = None) -> list[Path]:
     """枚举禁入面内的目标文件（按扩展名过滤，去重保序）。
+
+    增量模式（`changed` 非 None）只取清单内、命中禁入面的现存文件：本护栏的规则是**文件局部**的
+    （单文件正则 / 注释 / docstring），故增量与全量的新增判定等价，差别只在扫描面。
 
     Args:
         cfg: 仓配置。
         rule: 规则段。
+        changed: 增量模式的改动文件清单（相对仓根）；None 表示全量。
 
     Returns:
-        list[Path]: 文件清单。
+        list[Path]: 文件清单（增量模式保持清单顺序）。
     """
+    if changed is not None:
+        picked: list[Path] = []
+        for path in select_files(cfg.root, changed):
+            if path.suffix not in rule.include_extensions:
+                continue
+            rel = path.relative_to(cfg.root).as_posix()
+            if matches(rel, rule.deny_globs):
+                picked.append(path)
+        return picked
     files: list[Path] = []
     seen: set[str] = set()
     for root_rel in scan_roots(rule.deny_globs):
@@ -382,13 +396,22 @@ def scan_source(rel: str, source: str, rule: ProductLiteralsRules) -> tuple[list
     return hits, degraded
 
 
-def collect(cfg: Config, rule: ProductLiteralsRules, outcome: Outcome) -> list[Hit]:
+def collect(
+    cfg: Config,
+    rule: ProductLiteralsRules,
+    outcome: Outcome,
+    *,
+    changed: list[str] | None = None,
+) -> list[Hit]:
     """扫描禁入面并分类统计（允许面 / 排除面 / 降级）。
+
+    增量模式下分类计数只反映清单内文件，输出会标注「增量模式」，避免与全量口径混淆。
 
     Args:
         cfg: 仓配置。
         rule: 规则段。
         outcome: 结果累积器。
+        changed: 增量模式的改动文件清单；None 表示全量。
 
     Returns:
         list[Hit]: 命中清单。
@@ -398,7 +421,7 @@ def collect(cfg: Config, rule: ProductLiteralsRules, outcome: Outcome) -> list[H
     allowed = 0
     excluded = 0
     degraded = 0
-    for path in iter_target_files(cfg, rule):
+    for path in iter_target_files(cfg, rule, changed=changed):
         rel = path.relative_to(cfg.root).as_posix()
         if matches(rel, rule.exclude_globs):
             excluded += 1
@@ -583,18 +606,35 @@ def summarize(hits: list[Hit], outcome: Outcome) -> None:
     outcome.counts["code"] = outcome.counts["total"] - outcome.counts["comment"]
 
 
-def check(cfg: Config, rule: ProductLiteralsRules) -> Outcome:
+def _in_scope(rel: str, changed: list[str] | None) -> bool:
+    """基线条目是否落在本次比对范围内（全量恒真；增量按改动清单，含已删除文件）。
+
+    Args:
+        rel: 基线条目的相对路径。
+        changed: 增量清单；None 表示全量。
+
+    Returns:
+        bool: 参与本次 `stale` 统计返回 True。
+    """
+    return True if changed is None else rel in set(changed)
+
+
+def check(cfg: Config, rule: ProductLiteralsRules, *, changed: list[str] | None = None) -> Outcome:
     """执行护栏：扫描 → 基线比对 → 只减不增断言 → 问题清单。
+
+    增量模式只比对**清单内文件**的基线条目（未改动文件不会因本次改动新增违规，故结论与全量等价）；
+    「基线只减不增」的跨基线断言（`baseline_ref`）在增量下跳过——基线文件本身没被本次改动触碰。
 
     Args:
         cfg: 仓配置。
-        rule: 规则段。
+        rule: 规则段.
+        changed: 增量模式的改动文件清单；None 表示全量。
 
     Returns:
         Outcome: 结果。
     """
     outcome = Outcome()
-    hits = collect(cfg, rule, outcome)
+    hits = collect(cfg, rule, outcome, changed=changed)
     summarize(hits, outcome)
     actual = tally([baseline_key(hit) for hit in hits])
     baseline: dict[tuple[str, str], int] = {}
@@ -611,7 +651,9 @@ def check(cfg: Config, rule: ProductLiteralsRules) -> Outcome:
             added[key] = extra
     outcome.counts["baseline_entries"] = sum(baseline.values())
     outcome.counts["added"] = sum(added.values())
-    outcome.counts["stale"] = sum(max(0, count - actual.get(key, 0)) for key, count in baseline.items())
+    outcome.counts["stale"] = sum(
+        max(0, count - actual.get(key, 0)) for key, count in baseline.items() if _in_scope(key[0], changed)
+    )
     positions: dict[tuple[str, str], str] = {}
     for hit in hits:
         positions.setdefault(baseline_key(hit), f"{hit.file}:{hit.line_no}")
@@ -620,7 +662,7 @@ def check(cfg: Config, rule: ProductLiteralsRules) -> Outcome:
             f"[新增] {positions.get(key, key[0])} 命中 {count} 处（{key[1]}）"
             " → 改为按能力名 / 服务目录取用，或登记到产品自持声明"
         )
-    if rule.baseline and rule.baseline_ref:
+    if rule.baseline and rule.baseline_ref and changed is None:
         reference = ref_baseline(cfg, rule, outcome)
         if reference is not None:
             outcome.problems.extend(compare_baseline(baseline, reference))
@@ -858,6 +900,30 @@ def _mini_cfg(root: Path) -> Config:
     )
 
 
+def _read_changed(cfg: Config, files_from: str) -> list[str] | None:
+    """读取增量清单（空串表示全量）。
+
+    Args:
+        cfg: 仓配置。
+        files_from: 清单路径（可为相对仓根）。
+
+    Returns:
+        list[str] | None: 改动文件清单；全量模式返回 None。
+
+    Raises:
+        SystemExit: 清单不可读（退出码 2，避免「清单丢了还当全量跑」）。
+    """
+    if not files_from:
+        return None
+    path = Path(files_from)
+    if not path.is_absolute():
+        path = cfg.root / files_from
+    listed = read_file_list(path)
+    if listed is None:
+        raise SystemExit(2)
+    return listed
+
+
 def run(
     cfg: Config,
     *,
@@ -865,18 +931,20 @@ def run(
     update_baseline: bool,
     baseline_ref: str,
     as_self_test: bool,
+    files_from: str = "",
 ) -> int:
-    """执行产品字面量护栏。
+    """执行产品字面量护栏（可限定为改动文件清单 = 增量模式）。
 
     Args:
         cfg: 仓配置。
         json_output: 是否 JSON 输出。
-        update_baseline: 是否按当前扫描结果重写基线。
+        update_baseline: 是否按当前扫描结果重写基线（不得与增量模式同时使用）。
         baseline_ref: 只减不增断言的比较基准（空串取配置）。
         as_self_test: 是否只跑内置自检。
+        files_from: 改动文件清单路径（一行一个相对仓根路径）；空串表示全量。
 
     Returns:
-        int: 退出码（0 通过 / 1 有新增违规 / 2 规则缺失）。
+        int: 退出码（0 通过 / 1 有新增违规 / 2 规则缺失或参数冲突）。
     """
     try:
         rule = require(cfg.product_literals_rules, "product_literals", MIN_KEYS)
@@ -890,12 +958,21 @@ def run(
         return 0
     if baseline_ref:
         rule = dataclasses.replace(rule, baseline_ref=baseline_ref)
+    try:
+        changed = _read_changed(cfg, files_from)
+    except SystemExit:
+        return 2
+    if update_baseline and changed is not None:
+        out("[check_product_literals] 基线必须按全量重写：`--update-baseline` 不接受增量清单")
+        return 2
     if update_baseline:
         outcome = Outcome()
         hits = collect(cfg, rule, outcome)
         write_baseline(cfg.root / rule.baseline, hits, rule)
         out(f"[check_product_literals] 基线已更新：{len(hits)} 条 → {rule.baseline}")
         return 0
-    outcome = check(cfg, rule)
+    if changed is not None:
+        out(f"[check_product_literals] 增量模式：只扫 {len(changed)} 个改动文件")
+    outcome = check(cfg, rule, changed=changed)
     emit(outcome, as_json=json_output)
     return 1 if outcome.problems else 0

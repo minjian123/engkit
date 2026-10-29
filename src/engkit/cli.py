@@ -168,6 +168,12 @@ def _build_parser() -> argparse.ArgumentParser:
             action.add_argument("--update-baseline", action="store_true", help="按当前扫描结果重写基线")
         if name in ("service-boundaries", "bare-collections", "product-literals"):
             action.add_argument("--json", action="store_true", help="以 JSON 输出结果")
+        if name in ("bare-collections", "product-literals"):
+            action.add_argument(
+                "--files-from",
+                default="",
+                help="只扫清单内文件（一行一个相对仓根路径；增量模式，规则为文件局部故与全量等价）",
+            )
         if name == "product-literals":
             action.add_argument("--baseline-ref", default="", help="基线只减不增断言的比较基准（缺省取配置）")
         if name == "bare-collections":
@@ -667,6 +673,7 @@ def _cmd_base(args: argparse.Namespace) -> int:
             report_mode=bool(args.report),
             update_baseline=bool(args.update_baseline),
             as_self_test=bool(args.self_test),
+            files_from=str(args.files_from),
         )
     if name == "system-fields":
         from .base import system_fields
@@ -692,6 +699,7 @@ def _cmd_base(args: argparse.Namespace) -> int:
             update_baseline=bool(args.update_baseline),
             baseline_ref=str(args.baseline_ref),
             as_self_test=bool(args.self_test),
+            files_from=str(args.files_from),
         )
     from .base import docs_status
 
