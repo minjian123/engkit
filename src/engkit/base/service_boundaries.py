@@ -39,8 +39,10 @@ from pathlib import Path
 
 from ..config import Config, ServiceBoundariesRules, parse
 from ..console import out
+from . import table_index
 from .rules import RulesError, read_text, require
 from .scan_scope import read_file_list
+from .table_index import TableIndex
 
 MIN_KEYS = (
     "shared_libs",
@@ -56,14 +58,6 @@ MIN_KEYS = (
 
 SQL_HINTS = ("select", "insert", "update", "delete", "from", "join")
 """字符串常量按 SQL 认定的关键词（命中才做语句分析）。"""
-
-TABLENAME_MARKER = "__tablename__"
-"""表声明标记：源码不含该字面即不可能有 `__tablename__ = ...` 赋值，跳过 AST 解析。
-
-表声明只能来自裸标识符赋值（`Name(id="__tablename__")`），而 `Name` 必由该字面解析而来；
-故「先看字面、再解析」与「直接解析」等价，纯属省掉绝大多数文件的 AST 开销。
-全量扫描里的表名索引是**始终全量**的（跨服务唯一性无法局部判定），这条过滤是它便宜的前提。
-"""
 
 WRITE_OPERATIONS = frozenset({"write", "ddl"})
 """跨域写判定：SQL 写操作与 DDL（D4 无例外）。"""
@@ -1290,26 +1284,8 @@ def iter_import_candidates(path: Path) -> list[tuple[int, str]]:
     return found
 
 
-def iter_tablenames(root: Path) -> list[str]:
-    """解析包内源文件，产出全部 `__tablename__` 表名（保序去重）。
-
-    Args:
-        root: 包根目录。
-
-    Returns:
-        list[str]: 表名。
-    """
-    found: dict[str, None] = {}
-    for path in sorted(root.rglob("*.py")):
-        for _lineno, table in declared_tables(path):
-            found.setdefault(table, None)
-    return list(found)
-
-
 def declared_tables(path: Path) -> list[tuple[int, str]]:
-    """取文件内 `__tablename__` 表声明（表名小写）。
-
-    不含表声明标记的文件直接返回空表、不做 AST 解析（见 `TABLENAME_MARKER`）。
+    """取文件内 `__tablename__` 表声明（委托 `table_index`；本模块保留该入口）。
 
     Args:
         path: 源文件路径。
@@ -1317,19 +1293,7 @@ def declared_tables(path: Path) -> list[tuple[int, str]]:
     Returns:
         list[tuple[int, str]]: 行号与表名。
     """
-    text = read_text(path)
-    if TABLENAME_MARKER not in text:
-        return []
-    tree = ast.parse(text)
-    found: list[tuple[int, str]] = []
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Assign):
-            continue
-        if not any(isinstance(target, ast.Name) and target.id == "__tablename__" for target in node.targets):
-            continue
-        if isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):
-            found.append((node.lineno, node.value.value.lower()))
-    return found
+    return table_index.declared_tables(path)
 
 
 def bare_string_nodes(tree: ast.AST) -> set[int]:
@@ -1487,6 +1451,7 @@ class Checker:
         *,
         update_baseline: bool = False,
         changed: Sequence[str] | None = None,
+        cache: bool = True,
     ) -> None:
         """初始化。
 
@@ -1496,6 +1461,7 @@ class Checker:
             registry: 表归属 + 服务目录视图。
             update_baseline: 是否按当前扫描结果重写域级基线。
             changed: 增量模式的改动文件清单（相对仓根）；None 表示全量。
+            cache: 是否启用表声明索引缓存（`--no-cache` 时关闭，权威门禁走现扫）。
         """
         self.cfg = cfg
         self.rule = rule
@@ -1503,6 +1469,9 @@ class Checker:
         self.root = cfg.root
         self.update_baseline = update_baseline
         self.changed: frozenset[str] | None = None if changed is None else frozenset(normalize(rel) for rel in changed)
+        cache_path = cfg.root / rule.table_index_cache if rule.table_index_cache and cache else None
+        self.tables = TableIndex(cfg.root, cache_path)
+        """表声明索引：表名跨服务唯一性须看全仓，这条全局判据也走它取数（命中缓存不读文件）。"""
         self.outcome = Outcome(counts=dict.fromkeys(rule.counters, 0))
         self.packages: dict[str, Package] = {}
         self.layout = Layout(entries=(), shared=())
@@ -1666,6 +1635,7 @@ class Checker:
         self.check_domain_layout_shape()
         self.check_domain_ownership()
         self.finish_domain_baseline()
+        self.tables.save(prune=self.changed is None)
         return self.outcome
 
     def load_domain_state(self) -> None:
@@ -1717,6 +1687,24 @@ class Checker:
                     if top != package and any(part.startswith("_") for part in parts[1:]):
                         self.record(f"[跨包私有引用] {detail}", "private_reference")
 
+    def tables_of(self, pkg: Package) -> list[str]:
+        """取某包声明的全部表名（保序去重）。
+
+        逐文件走 `tables` 索引：文件没变就命中缓存、连读都不读——这条是全局判据里唯一
+        随文件数线性增长的部分，也是增量模式下的耗时地板。
+
+        Args:
+            pkg: 包信息。
+
+        Returns:
+            list[str]: 表名清单（按文件路径序、包内去重）。
+        """
+        found: dict[str, None] = {}
+        for path in sorted(pkg.path.rglob("*.py")):
+            for _lineno, table in self.tables.declarations(path):
+                found.setdefault(table, None)
+        return list(found)
+
     def check_tables(self) -> None:
         """规则 5：表名 / 前缀跨服务唯一 + 声明的表名须在归属登记中。"""
         owners: dict[str, str] = {}
@@ -1724,7 +1712,7 @@ class Checker:
         known: dict[str, None] = {}
         registered = self.registry.names()
         for package, pkg in self.packages.items():
-            declared = iter_tablenames(pkg.path)
+            declared = self.tables_of(pkg)
             for table in declared:
                 known.setdefault(table, None)
             if pkg.shared:
@@ -1770,7 +1758,7 @@ class Checker:
             service = self.service_of(package)
             for path in self.package_files(pkg, skip_tests=True):
                 rel = rel_posix(path, self.root)
-                for lineno, table in declared_tables(path):
+                for lineno, table in self.tables.declarations(path):
                     if table not in registered:
                         self.record(
                             f"[表归属未登记] {rel}:{lineno} 声明 {table}（表归属登记无此表）",
@@ -2161,7 +2149,7 @@ class Checker:
         declared: set[str] = set()
         if not any("__tablename__" in line for line in lines):
             return declared
-        for lineno, table in declared_tables(self.root / rel):
+        for lineno, table in self.tables.declarations(self.root / rel):
             declared.add(table)
             target_domain = self.registry.domain_of(table)
             if not target_domain:
@@ -2274,7 +2262,7 @@ class Checker:
             bool: 声明表返回 True。
         """
         try:
-            return bool(declared_tables(self.root / rel))
+            return bool(self.tables.declarations(self.root / rel))
         except (OSError, SyntaxError):
             return False
 
@@ -2418,6 +2406,7 @@ def check(
     registry: Registry | None = None,
     update_baseline: bool = False,
     changed: Sequence[str] | None = None,
+    cache: bool = True,
 ) -> Outcome:
     """执行全部检查（登记源可注入，供自检使用）。
 
@@ -2427,12 +2416,13 @@ def check(
         registry: 表归属视图（缺省从登记源解析）。
         update_baseline: 是否按当前扫描结果重写域级基线。
         changed: 增量模式的改动文件清单（相对仓根）；None 表示全量。
+        cache: 是否启用表声明索引缓存。
 
     Returns:
         Outcome: 校验结果。
     """
     view = registry if registry is not None else load_registry(cfg, rule)
-    return Checker(cfg, rule, view, update_baseline=update_baseline, changed=changed).run()
+    return Checker(cfg, rule, view, update_baseline=update_baseline, changed=changed, cache=cache).run()
 
 
 def emit(outcome: Outcome, *, as_json: bool) -> None:
@@ -2604,7 +2594,15 @@ def read_changed(cfg: Config, files_from: str) -> list[str] | None:
     return read_file_list(path)
 
 
-def run(cfg: Config, *, json_output: bool, update_baseline: bool, as_self_test: bool, files_from: str = "") -> int:
+def run(
+    cfg: Config,
+    *,
+    json_output: bool,
+    update_baseline: bool,
+    as_self_test: bool,
+    files_from: str = "",
+    cache: bool = True,
+) -> int:
     """执行服务边界校验（可限定为改动文件清单 = 增量模式）。
 
     增量只作用于**逐文件判据**；全局判据（跨服务表名 / 前缀唯一、归属登记对账、ops 镜像闭包、
@@ -2616,6 +2614,7 @@ def run(cfg: Config, *, json_output: bool, update_baseline: bool, as_self_test: 
         update_baseline: 是否按当前扫描结果重写域级基线（**不得与增量同时使用**）。
         as_self_test: 是否只跑内置自检。
         files_from: 改动文件清单路径；空串表示全量。
+        cache: 是否启用表声明索引缓存（`--no-cache` 关掉，权威门禁走现扫）。
 
     Returns:
         int: 退出码（0 通过 / 1 违规或登记源不可解析 / 2 规则未登记、登记源缺失或参数冲突）。
@@ -2645,7 +2644,7 @@ def run(cfg: Config, *, json_output: bool, update_baseline: bool, as_self_test: 
                 "全局判据（表名唯一 / 归属对账 / 镜像闭包 / 域覆盖 / 基线陈旧）恒全量"
             )
     try:
-        outcome = check(cfg, rule, update_baseline=update_baseline, changed=changed)
+        outcome = check(cfg, rule, update_baseline=update_baseline, changed=changed, cache=cache)
     except RulesError as exc:
         out(f"[check_service_boundaries] {exc}")
         return 2
