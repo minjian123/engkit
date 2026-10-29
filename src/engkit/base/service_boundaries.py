@@ -2559,8 +2559,7 @@ class Checker:
             if used:
                 continue
             self.record(
-                f"[出口白名单陈旧] {domain} / {symbol} 已不再命中，"
-                "白名单只减不增，请从出口白名单文件删除该条",
+                f"[出口白名单陈旧] {domain} / {symbol} 已不再命中，白名单只减不增，请从出口白名单文件删除该条",
                 "domain_layout_violation",
             )
 
@@ -3473,7 +3472,7 @@ def self_test() -> int:
                 "pkg/services/alpha/src/alpha/domains/alpha/api/helper.py": "VALUE = 0\n",
             },
         )
-        export_ok = "from alpha.domains.alpha.dto import VALUE as VALUE\n" '__all__ = ["VALUE"]\n'
+        export_ok = 'from alpha.domains.alpha.dto import VALUE as VALUE\n__all__ = ["VALUE"]\n'
         write_files(root, {public_file: export_ok})
         expect(not scan().problems, "出口只导出 DTO 放行（D6 正例）")
 
