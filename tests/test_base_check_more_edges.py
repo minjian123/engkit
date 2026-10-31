@@ -529,3 +529,34 @@ def test_system_fields_parse_enum_member_values(tmp_path: Path) -> None:
     write(tmp_path, {"src/star.py": "FORM_CATALOG = (rec(form_key='beta', **extra),)\n"})
     star = dataclasses.replace(rule.catalog, path="src/star.py")
     assert system_fields.parse_records(cfg, star) == [{"form_key": "beta"}]
+
+
+def test_system_fields_enum_declared_in_other_file(tmp_path: Path) -> None:
+    """枚举定义在别处时用 `类名@路径` 声明（清单收敛到独立常量模块后的真实形态）。"""
+    write(
+        tmp_path,
+        {
+            "src/keys.py": "class DataSourceKey(StrEnum):\n    ROLE = 'role'\n",
+            "src/registry.py": (
+                "class DataSourceKind(StrEnum):\n"
+                "    DICT = 'dict'\n\n\n"
+                "DATA_SOURCE_CATALOG = (\n"
+                "    rec(data_source_key=DataSourceKey.ROLE.value, kind=DataSourceKind.DICT.value),\n"
+                ")\n"
+            ),
+        },
+    )
+    cfg = config(tmp_path)
+    rule = cfg.system_fields_rules
+    spec = dataclasses.replace(rule.datasource, path="src/registry.py", enum="DataSourceKind,DataSourceKey@src/keys.py")
+    assert system_fields.parse_enum_values(cfg, spec) == {"ROLE": "role", "DICT": "dict"}
+    assert system_fields.parse_records(cfg, spec) == [{"data_source_key": "role", "kind": "dict"}]
+    # 未加 `@路径` 时只在清单同文件里找（找不到即空，不猜别处）
+    only_local = dataclasses.replace(spec, enum="DataSourceKind,DataSourceKey")
+    assert system_fields.parse_enum_values(cfg, only_local) == {"DICT": "dict"}
+    assert system_fields.parse_records(cfg, only_local) == [{"kind": "dict"}]
+    # 声明的枚举文件不存在：跳过而不崩
+    missing = dataclasses.replace(spec, enum="DataSourceKey@src/none.py")
+    assert system_fields.parse_enum_values(cfg, missing) == {}
+    # 空项与「只有路径没类名」的项被忽略（容错声明写法）
+    assert system_fields.enum_names_of("A@x.py, B ,C@y.py, ,@orphan.py") == frozenset({"A", "B", "C"})

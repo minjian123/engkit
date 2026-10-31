@@ -110,23 +110,25 @@ def parse_enum_values(cfg: Config, spec: RegistrySpec) -> dict[str, str]:
     Returns:
         dict[str, str]: 成员名 → 取值。
     """
-    path = cfg.root / spec.path
-    if not spec.enum or not path.is_file():
+    if not spec.enum:
         return {}
-    tree = ast.parse(read_text(path))
-    declared = enum_names_of(spec.enum)
     values: dict[str, str] = {}
-    for node in tree.body:
-        if not isinstance(node, ast.ClassDef) or node.name not in declared:
+    for class_name, relative in enum_declarations(spec.enum):
+        path = cfg.root / (relative or spec.path)
+        if not path.is_file():
             continue
-        for item in node.body:
-            if not (isinstance(item, ast.Assign) and isinstance(item.value, ast.Constant)):
+        tree = ast.parse(read_text(path))
+        for node in tree.body:
+            if not isinstance(node, ast.ClassDef) or node.name != class_name:
                 continue
-            if not isinstance(item.value.value, str):
-                continue
-            for target in item.targets:
-                if isinstance(target, ast.Name):
-                    values[target.id] = item.value.value
+            for item in node.body:
+                if not (isinstance(item, ast.Assign) and isinstance(item.value, ast.Constant)):
+                    continue
+                if not isinstance(item.value.value, str):
+                    continue
+                for target in item.targets:
+                    if isinstance(target, ast.Name):
+                        values[target.id] = item.value.value
     return values
 
 
@@ -154,8 +156,31 @@ def resolve_kind_node(node: ast.expr, enum_name: str, enum_values: dict[str, str
     return None
 
 
+def enum_declarations(enum_name: str) -> list[tuple[str, str]]:
+    """拆开 `enum` 声明为（类名，路径）清单。
+
+    每项形如 `FormKind`（取清单同文件）或 `DataSourceKey@相对/路径.py`（枚举定义在别处：
+    清单收敛到独立常量模块后，枚举与清单常不同文件）。
+
+    Args:
+        enum_name: 登记项里的 `enum` 取值（逗号分隔）。
+
+    Returns:
+        list[tuple[str, str]]: （类名, 路径或空串）清单。
+    """
+    items: list[tuple[str, str]] = []
+    for raw in enum_name.split(","):
+        entry = raw.strip()
+        if not entry:
+            continue
+        name, _, path = entry.partition("@")
+        if name.strip():
+            items.append((name.strip(), path.strip()))
+    return items
+
+
 def enum_names_of(enum_name: str) -> frozenset[str]:
-    """把 `enum` 声明拆为类名集合（逗号分隔）。
+    """把 `enum` 声明拆为类名集合（逗号分隔，忽略 `@路径` 限定）。
 
     Args:
         enum_name: 登记项里的 `enum` 取值。
@@ -163,7 +188,7 @@ def enum_names_of(enum_name: str) -> frozenset[str]:
     Returns:
         frozenset[str]: 类名集合。
     """
-    return frozenset(name.strip() for name in enum_name.split(",") if name.strip())
+    return frozenset(name for name, _ in enum_declarations(enum_name))
 
 
 def parse_kind_declarations(cfg: Config, spec: RegistrySpec) -> list[tuple[str, bool, str | None]]:
