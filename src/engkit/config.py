@@ -742,6 +742,25 @@ class BareCollectionsRules:
 
 
 @dataclass(frozen=True)
+class SnowflakeIdsRules:
+    """雪花 ID 静态护栏规则（`[rules.snowflake_ids]`）。
+
+    Attributes:
+        scan_targets: 扫描根清单（相对仓根）。
+        id_names: 精确匹配的 ID 列 / 字段名（如 `id` / `tenant_scope`）。
+        id_suffixes: ID 名后缀（如 `_id` / `_by`）。
+        whitelist: 非 ID 的 `BigInteger` 白名单（`路径::列名`，须写明理由于配置注释）。
+        exclude_parts: 剪枝目录名。
+    """
+
+    scan_targets: tuple[str, ...]
+    id_names: tuple[str, ...]
+    id_suffixes: tuple[str, ...]
+    whitelist: tuple[str, ...]
+    exclude_parts: tuple[str, ...] = ("__pycache__", ".venv", "node_modules", ".git", "tests")
+
+
+@dataclass(frozen=True)
 class MetricsRules:
     """边界度量采集规则（`[rules.metrics]`）。
 
@@ -852,6 +871,7 @@ class Config:
     backend_base_rules: BackendBaseRules | None = None
     boundaries_rules: ServiceBoundariesRules | None = None
     collections_rules: BareCollectionsRules | None = None
+    snowflake_ids_rules: SnowflakeIdsRules | None = None
     system_fields_rules: SystemFieldsRules | None = None
     prototype_rules: PrototypeRules | None = None
     env_example_rules: EnvExampleRules | None = None
@@ -1741,6 +1761,28 @@ def _parse_collections_rules(table: dict[str, Any], where: str) -> BareCollectio
     )
 
 
+def _parse_snowflake_ids_rules(table: dict[str, Any], where: str) -> SnowflakeIdsRules:
+    """解析 `[rules.snowflake_ids]`。
+
+    Args:
+        table: 子表。
+        where: 位置描述。
+
+    Returns:
+        SnowflakeIdsRules: 规则。
+    """
+    _check_keys(table, ("scan_targets", "id_names", "id_suffixes", "whitelist", "exclude_parts"), where)
+    return SnowflakeIdsRules(
+        scan_targets=_strings(table, "scan_targets", where),
+        id_names=_strings(table, "id_names", where),
+        id_suffixes=_strings(table, "id_suffixes", where),
+        whitelist=_strings(table, "whitelist", where),
+        exclude_parts=_strings(
+            table, "exclude_parts", where, ("__pycache__", ".venv", "node_modules", ".git", "tests")
+        ),
+    )
+
+
 def _parse_metrics_rules(table: dict[str, Any], where: str) -> MetricsRules:
     """解析 `[rules.metrics]`。
 
@@ -1917,6 +1959,7 @@ def parse(raw: dict[str, Any], path: Path) -> Config:
     backend_base_rule_set: BackendBaseRules | None = None
     boundaries_rule_set: ServiceBoundariesRules | None = None
     collections_rule_set: BareCollectionsRules | None = None
+    snowflake_ids_rule_set: SnowflakeIdsRules | None = None
     system_fields_rule_set: SystemFieldsRules | None = None
     prototype_rule_set: PrototypeRules | None = None
     env_example_rule_set: EnvExampleRules | None = None
@@ -1930,6 +1973,7 @@ def parse(raw: dict[str, Any], path: Path) -> Config:
         "backend_base",
         "service_boundaries",
         "bare_collections",
+        "snowflake_ids",
         "system_fields",
         "prototype",
         "env_example",
@@ -1951,6 +1995,10 @@ def parse(raw: dict[str, Any], path: Path) -> Config:
     if "bare_collections" in rules:
         collections_rule_set = _parse_collections_rules(
             _table(rules, "bare_collections", "rules.bare_collections"), "rules.bare_collections"
+        )
+    if "snowflake_ids" in rules:
+        snowflake_ids_rule_set = _parse_snowflake_ids_rules(
+            _table(rules, "snowflake_ids", "rules.snowflake_ids"), "rules.snowflake_ids"
         )
     if "system_fields" in rules:
         system_fields_rule_set = _parse_system_fields_rules(
@@ -2100,6 +2148,7 @@ def parse(raw: dict[str, Any], path: Path) -> Config:
         backend_base_rules=backend_base_rule_set,
         boundaries_rules=boundaries_rule_set,
         collections_rules=collections_rule_set,
+        snowflake_ids_rules=snowflake_ids_rule_set,
         system_fields_rules=system_fields_rule_set,
         prototype_rules=prototype_rule_set,
         env_example_rules=env_example_rule_set,

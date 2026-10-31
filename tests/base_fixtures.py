@@ -48,6 +48,12 @@ ascending = ["SortedList"]
 [rules.bare_collections.reasons]
 banned = "落白名单"
 
+[rules.snowflake_ids]
+scan_targets = ["src", "svc"]
+id_names = ["id", "tenant_scope"]
+id_suffixes = ["_id", "_by"]
+whitelist = ["src/models/demo.py::size"]
+
 [rules.system_fields]
 table_dir = "docs/表"
 row_form_key = "form_key"
