@@ -486,3 +486,46 @@ def test_registry_spec_defaults() -> None:
     spec = RegistrySpec(path="a.py", const="C", key_field="k")
     assert spec.enum == "" and spec.kind_field == "kind"
     assert json.dumps({"ok": True})
+
+
+def test_system_fields_parse_enum_member_values(tmp_path: Path) -> None:
+    """标识用枚举成员（`data_source_key=DataSourceKey.ROLE.value`）可解析；多枚举声明按名单限定。
+
+    背景（2026-10-31 bms 02_01）：清单里的标识从字面量收敛为 `DataSourceKey` 枚举成员后，
+    只认字符串字面量的解析会让清单被判为「不可解析或为空」，整条护栏失效。
+    """
+    write(
+        tmp_path,
+        {
+            "src/forms.py": (
+                "class FormKind(StrEnum):\n"
+                "    DICT = 'dict'\n\n\n"
+                "class DataSourceKey(StrEnum):\n"
+                "    ROLE = 'role'\n\n\n"
+                "FORM_CATALOG = (\n"
+                "    rec(\n"
+                "        form_key='alpha',\n"
+                "        table='sys_alpha',\n"
+                "        kind=FormKind.DICT.value,\n"
+                "        data_source_key=DataSourceKey.ROLE.value,\n"
+                "    ),\n"
+                ")\n"
+            )
+        },
+    )
+    cfg = config(tmp_path)
+    rule = cfg.system_fields_rules
+    multi = dataclasses.replace(rule.catalog, enum="FormKind,DataSourceKey")
+    records = system_fields.parse_records(cfg, multi)
+    assert records == [{"form_key": "alpha", "table": "sys_alpha", "kind": "dict", "data_source_key": "role"}]
+    assert system_fields.parse_enum_values(cfg, multi) == {"DICT": "dict", "ROLE": "role"}
+    # 只声明 FormKind 时，别的枚举成员不解析（防止跨清单误配）
+    only_form = dataclasses.replace(rule.catalog, enum="FormKind")
+    assert "data_source_key" not in system_fields.parse_records(cfg, only_form)[0]
+    node = ast.parse("DataSourceKey.ROLE.value").body[0].value  # type: ignore[attr-defined]
+    assert system_fields.resolve_kind_node(node, "FormKind,DataSourceKey", {"ROLE": "role"}) == "role"
+    assert system_fields.resolve_kind_node(node, "FormKind", {"ROLE": "role"}) is None
+    # `**kwargs` 展开的关键字没有名称（arg=None），跳过而不是崩
+    write(tmp_path, {"src/star.py": "FORM_CATALOG = (rec(form_key='beta', **extra),)\n"})
+    star = dataclasses.replace(rule.catalog, path="src/star.py")
+    assert system_fields.parse_records(cfg, star) == [{"form_key": "beta"}]

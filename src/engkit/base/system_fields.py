@@ -71,23 +71,31 @@ def _sequence(path: Path, const_name: str) -> list[ast.expr]:
 
 
 def parse_records(cfg: Config, spec: RegistrySpec) -> list[dict[str, str]]:
-    """按 AST 解析清单常量的关键字字面量参数。
+    """按 AST 解析清单常量的关键字取值参数（字符串字面量 + `<枚举>.<成员>.value`）。
+
+    清单里的标识既可写字面量（`data_source_key="role"`），也可写登记枚举的成员
+    （`data_source_key=DataSourceKey.ROLE.value`）——后者是标识收敛的推荐形态。两种形态
+    都要能解析，否则清单被判定为「不可解析或为空」，护栏失效（2026-10-31 02_01 实测）。
 
     Args:
         cfg: 仓配置。
-        spec: 清单定位。
+        spec: 清单定位（`enum` 可写多个枚举，逗号分隔）。
 
     Returns:
-        list[dict[str, str]]: 每条记录的字符串关键字参数（非字面量参数跳过）。
+        list[dict[str, str]]: 每条记录的可解析关键字参数（非字符串 / 不可解析值跳过）。
     """
+    enum_values = parse_enum_values(cfg, spec)
     records: list[dict[str, str]] = []
     for item in _sequence(cfg.root / spec.path, spec.const):
         if not isinstance(item, ast.Call):
             continue
         record: dict[str, str] = {}
         for keyword in item.keywords:
-            if keyword.arg and isinstance(keyword.value, ast.Constant) and isinstance(keyword.value.value, str):
-                record[keyword.arg] = keyword.value.value
+            if not keyword.arg:
+                continue
+            resolved = resolve_kind_node(keyword.value, spec.enum, enum_values)
+            if resolved is not None:
+                record[keyword.arg] = resolved
         records.append(record)
     return records
 
@@ -106,9 +114,10 @@ def parse_enum_values(cfg: Config, spec: RegistrySpec) -> dict[str, str]:
     if not spec.enum or not path.is_file():
         return {}
     tree = ast.parse(read_text(path))
+    declared = enum_names_of(spec.enum)
     values: dict[str, str] = {}
     for node in tree.body:
-        if not isinstance(node, ast.ClassDef) or node.name != spec.enum:
+        if not isinstance(node, ast.ClassDef) or node.name not in declared:
             continue
         for item in node.body:
             if not (isinstance(item, ast.Assign) and isinstance(item.value, ast.Constant)):
@@ -122,11 +131,11 @@ def parse_enum_values(cfg: Config, spec: RegistrySpec) -> dict[str, str]:
 
 
 def resolve_kind_node(node: ast.expr, enum_name: str, enum_values: dict[str, str]) -> str | None:
-    """解析 `kind` 取值节点：字符串字面量直取，`<Enum>.<MEMBER>.value` 经枚举映射解析。
+    """解析取值节点：字符串字面量直取，`<Enum>.<MEMBER>.value` 经枚举映射解析。
 
     Args:
         node: 取值节点。
-        enum_name: 枚举类名。
+        enum_name: 枚举类名（可逗号分隔多个，同一清单可跨多类取值）。
         enum_values: 成员名 → 取值。
 
     Returns:
@@ -139,10 +148,22 @@ def resolve_kind_node(node: ast.expr, enum_name: str, enum_values: dict[str, str
         and node.attr == "value"
         and isinstance(node.value, ast.Attribute)
         and isinstance(node.value.value, ast.Name)
-        and node.value.value.id == enum_name
+        and node.value.value.id in enum_names_of(enum_name)
     ):
         return enum_values.get(node.value.attr)
     return None
+
+
+def enum_names_of(enum_name: str) -> frozenset[str]:
+    """把 `enum` 声明拆为类名集合（逗号分隔）。
+
+    Args:
+        enum_name: 登记项里的 `enum` 取值。
+
+    Returns:
+        frozenset[str]: 类名集合。
+    """
+    return frozenset(name.strip() for name in enum_name.split(",") if name.strip())
 
 
 def parse_kind_declarations(cfg: Config, spec: RegistrySpec) -> list[tuple[str, bool, str | None]]:
