@@ -751,6 +751,31 @@ class SnowflakeIdsRules:
 
 
 @dataclass(frozen=True)
+class TestDbIsolationRules:
+    """测试库隔离护栏规则（`[rules.test_db_isolation]`，任务 04-6-1）。
+
+    Attributes:
+        scan_targets: 扫描根清单（相对仓根）。
+        allow_marker: 白名单 marker 名（如 `own_db`，理由必填）。
+        db_literal_prefixes: 自建库判定的连接串前缀（字符串常量命中即违规）。
+        engine_factories: 引擎构造函数名（测试代码内直接构造即违规）。
+        db_file_suffixes: 临时库文件名后缀（`tmp_path / "x.db"` 命中即违规）。
+        id_columns: 原生 SQL 里按 ID 过滤的列名（绑定 int 常量即违规）。
+        cleanup_calls: 全表清理调用名（`drop_all` 等，无白名单即违规）。
+        exclude_parts: 剪枝目录名。
+    """
+
+    scan_targets: tuple[str, ...]
+    allow_marker: str = "own_db"
+    db_literal_prefixes: tuple[str, ...] = ("sqlite+aiosqlite:///", "sqlite:///")
+    engine_factories: tuple[str, ...] = ("create_async_engine", "create_engine")
+    db_file_suffixes: tuple[str, ...] = (".db",)
+    id_columns: tuple[str, ...] = ("id",)
+    cleanup_calls: tuple[str, ...] = ("drop_all",)
+    exclude_parts: tuple[str, ...] = ("__pycache__", ".venv", "node_modules", ".git")
+
+
+@dataclass(frozen=True)
 class MetricsRules:
     """边界度量采集规则（`[rules.metrics]`）。
 
@@ -860,6 +885,7 @@ class Config:
     boundaries_rules: ServiceBoundariesRules | None = None
     collections_rules: BareCollectionsRules | None = None
     snowflake_ids_rules: SnowflakeIdsRules | None = None
+    test_db_isolation_rules: TestDbIsolationRules | None = None
     system_fields_rules: SystemFieldsRules | None = None
     prototype_rules: PrototypeRules | None = None
     env_example_rules: EnvExampleRules | None = None
@@ -1770,6 +1796,42 @@ def _parse_snowflake_ids_rules(table: dict[str, Any], where: str) -> SnowflakeId
     )
 
 
+def _parse_test_db_isolation_rules(table: dict[str, Any], where: str) -> TestDbIsolationRules:
+    """解析 `[rules.test_db_isolation]`。
+
+    Args:
+        table: 子表。
+        where: 位置描述。
+
+    Returns:
+        TestDbIsolationRules: 规则。
+    """
+    _check_keys(
+        table,
+        (
+            "scan_targets",
+            "allow_marker",
+            "db_literal_prefixes",
+            "engine_factories",
+            "db_file_suffixes",
+            "id_columns",
+            "cleanup_calls",
+            "exclude_parts",
+        ),
+        where,
+    )
+    return TestDbIsolationRules(
+        scan_targets=_strings(table, "scan_targets", where),
+        allow_marker=_string(table, "allow_marker", where, "own_db"),
+        db_literal_prefixes=_strings(table, "db_literal_prefixes", where, ("sqlite+aiosqlite:///", "sqlite:///")),
+        engine_factories=_strings(table, "engine_factories", where, ("create_async_engine", "create_engine")),
+        db_file_suffixes=_strings(table, "db_file_suffixes", where, (".db",)),
+        id_columns=_strings(table, "id_columns", where, ("id",)),
+        cleanup_calls=_strings(table, "cleanup_calls", where, ("drop_all",)),
+        exclude_parts=_strings(table, "exclude_parts", where, ("__pycache__", ".venv", "node_modules", ".git")),
+    )
+
+
 def _parse_metrics_rules(table: dict[str, Any], where: str) -> MetricsRules:
     """解析 `[rules.metrics]`。
 
@@ -1947,6 +2009,7 @@ def parse(raw: dict[str, Any], path: Path) -> Config:
     boundaries_rule_set: ServiceBoundariesRules | None = None
     collections_rule_set: BareCollectionsRules | None = None
     snowflake_ids_rule_set: SnowflakeIdsRules | None = None
+    test_db_isolation_rule_set: TestDbIsolationRules | None = None
     system_fields_rule_set: SystemFieldsRules | None = None
     prototype_rule_set: PrototypeRules | None = None
     env_example_rule_set: EnvExampleRules | None = None
@@ -1961,6 +2024,7 @@ def parse(raw: dict[str, Any], path: Path) -> Config:
         "service_boundaries",
         "bare_collections",
         "snowflake_ids",
+        "test_db_isolation",
         "system_fields",
         "prototype",
         "env_example",
@@ -1986,6 +2050,10 @@ def parse(raw: dict[str, Any], path: Path) -> Config:
     if "snowflake_ids" in rules:
         snowflake_ids_rule_set = _parse_snowflake_ids_rules(
             _table(rules, "snowflake_ids", "rules.snowflake_ids"), "rules.snowflake_ids"
+        )
+    if "test_db_isolation" in rules:
+        test_db_isolation_rule_set = _parse_test_db_isolation_rules(
+            _table(rules, "test_db_isolation", "rules.test_db_isolation"), "rules.test_db_isolation"
         )
     if "system_fields" in rules:
         system_fields_rule_set = _parse_system_fields_rules(
@@ -2129,6 +2197,7 @@ def parse(raw: dict[str, Any], path: Path) -> Config:
         boundaries_rules=boundaries_rule_set,
         collections_rules=collections_rule_set,
         snowflake_ids_rules=snowflake_ids_rule_set,
+        test_db_isolation_rules=test_db_isolation_rule_set,
         system_fields_rules=system_fields_rule_set,
         prototype_rules=prototype_rule_set,
         env_example_rules=env_example_rule_set,

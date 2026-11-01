@@ -54,6 +54,10 @@ id_names = ["id", "tenant_scope"]
 id_suffixes = ["_id", "_by"]
 whitelist = ["src/models/demo.py::size"]
 
+[rules.test_db_isolation]
+scan_targets = ["src", "svc"]
+allow_marker = "own_db"
+
 [rules.system_fields]
 table_dir = "docs/表"
 row_form_key = "form_key"

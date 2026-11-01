@@ -144,6 +144,7 @@ def _build_parser() -> argparse.ArgumentParser:
         ("service-boundaries", "服务边界与跨库访问（服务维 + 域级）"),
         ("bare-collections", "集合声明白名单"),
         ("snowflake-ids", "雪花 ID（模型列 / 契约字段）静态护栏"),
+        ("test-db-isolation", "测试库隔离（自建库 / 裸 int ID / 清理他人数据）静态护栏"),
         ("system-fields", "系统字段（form_key / data_source_key）"),
         ("prototype-review", "界面「实现 ↔ 原型」对照"),
         ("env-example", "环境变量模板键位"),
@@ -159,6 +160,7 @@ def _build_parser() -> argparse.ArgumentParser:
             "service-boundaries",
             "bare-collections",
             "snowflake-ids",
+            "test-db-isolation",
             "system-fields",
             "prototype-review",
             "env-example",
@@ -169,11 +171,17 @@ def _build_parser() -> argparse.ArgumentParser:
             action.add_argument("--update-baseline", action="store_true", help="按当前扫描结果重写基线")
         if name in ("service-boundaries", "bare-collections", "product-literals"):
             action.add_argument("--json", action="store_true", help="以 JSON 输出结果")
-        if name in ("bare-collections", "snowflake-ids", "product-literals"):
+        if name in ("bare-collections", "snowflake-ids", "test-db-isolation", "product-literals"):
             action.add_argument(
                 "--files-from",
                 default="",
                 help="只扫清单内文件（一行一个相对仓根路径；增量模式，规则为文件局部故与全量等价）",
+            )
+        if name == "test-db-isolation":
+            action.add_argument(
+                "--list-own-db",
+                action="store_true",
+                help="只导出 own_db 白名单清单（文件 / 用例 / 理由）",
             )
         if name == "service-boundaries":
             action.add_argument("--no-cache", action="store_true", help="不用表声明索引缓存（现扫全量）")
@@ -698,6 +706,15 @@ def _cmd_base(args: argparse.Namespace) -> int:
             cfg,
             as_self_test=bool(args.self_test),
             files_from=str(args.files_from),
+        )
+    if name == "test-db-isolation":
+        from .base import test_db_isolation
+
+        return test_db_isolation.run(
+            cfg,
+            as_self_test=bool(args.self_test),
+            files_from=str(args.files_from),
+            list_own_db=bool(args.list_own_db),
         )
     if name == "prototype-review":
         from .base import prototype_review
