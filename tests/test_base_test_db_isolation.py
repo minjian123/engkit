@@ -184,6 +184,12 @@ def test_module_pytestmark_and_base_modules(tmp_path: Path, capsys: pytest.Captu
     assert test_db_isolation._pytestmark_reason(ast.parse(GOOD), "own_db") == ""
     assert test_db_isolation._pytestmark_reason(ast.parse(non_call_element), "own_db") == ""
     assert test_db_isolation._pytestmark_reason(ast.parse(non_str_reason), "own_db") == ""
+
+    # 内存库豁免：字面量形式 / `:memory:` 形式 / 无参引擎构造（非内存库，仍判）
+    assert test_db_isolation.scan_text("src/tests/test_mem.py", 'X = "sqlite://"\n', rule) == []
+    assert test_db_isolation.scan_text("src/tests/test_mem.py", 'X = "sqlite:///:memory:"\n', rule) == []
+    no_args = "def test_c():\n    e = create_engine()\n"
+    assert len(test_db_isolation.scan_text("src/tests/test_noargs.py", no_args, rule)) == 1
     assert len(test_db_isolation.scan_text("src/tests/test_plain.py", plain_mark, rule)) == 1
 
     write(tmp_path, {"src/tests/test_base.py": BAD, "src/tests/test_other.py": BAD})

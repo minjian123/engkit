@@ -105,6 +105,41 @@ def _pytestmark_reason(tree: ast.Module, marker: str) -> str:
     return ""
 
 
+def _is_memory_db(value: str, rule: TestDbIsolationRules) -> bool:
+    """连接串是否指向**内存库**（不落文件、不产生跨用例状态）。
+
+    为什么豁免：G1 的原意是「禁止为图省事自建 SQLite **文件**」——文件才是并行干扰与磁盘膨胀的来源。
+    内存库（`sqlite://`、`sqlite+aiosqlite://`、含 `:memory:`）每条连接独立、用完即消，
+    是「需要一条干净连接来验证拦截 / 降级」之类用例的正当手段，不应被判违规。
+
+    Args:
+        value: 连接串字面量。
+        rule: 规则段。
+
+    Returns:
+        bool: 内存库为 True。
+    """
+    if ":memory:" in value:
+        return True
+    return value in rule.memory_literals
+
+
+def _engine_on_memory(node: ast.Call, rule: TestDbIsolationRules) -> bool:
+    """引擎构造是否指向内存库（首个位置参数为内存连接串）。
+
+    Args:
+        node: 调用节点。
+        rule: 规则段。
+
+    Returns:
+        bool: 内存库引擎为 True。
+    """
+    if not node.args:
+        return False
+    first = node.args[0]
+    return isinstance(first, ast.Constant) and isinstance(first.value, str) and _is_memory_db(first.value, rule)
+
+
 def _call_name(node: ast.AST) -> str:
     """取调用名（支持 `mod.func()` 与 `func()`）。
 
@@ -205,12 +240,16 @@ class _Scanner(ast.NodeVisitor):
         self._scope(node)
 
     def visit_Constant(self, node: ast.Constant) -> None:
-        """G1：连接串字面量。
+        """G1：连接串字面量（内存库不算自建库）。
 
         Args:
             node: 常量节点。
         """
-        if isinstance(node.value, str) and node.value.startswith(self.rule.db_literal_prefixes):
+        if (
+            isinstance(node.value, str)
+            and node.value.startswith(self.rule.db_literal_prefixes)
+            and not _is_memory_db(node.value, self.rule)
+        ):
             self._report(node, "G1 自建 SQLite：连接串字面量（应用共享夹具；确需建库请打 own_db 白名单）")
         self.generic_visit(node)
 
@@ -221,7 +260,7 @@ class _Scanner(ast.NodeVisitor):
             node: 调用节点。
         """
         name = _call_name(node)
-        if name in self.rule.engine_factories:
+        if name in self.rule.engine_factories and not _engine_on_memory(node, self.rule):
             self._report(node, f"G1 自建 SQLite：直接构造引擎 {name}()（应用共享夹具）")
         if name in self.rule.cleanup_calls:
             self._report(node, f"G3 清理他人数据：{name}() 会清空共享库（确需请打 own_db 白名单）")
@@ -400,6 +439,7 @@ def self_test(rule: TestDbIsolationRules) -> int:
         ("合规样本", good, 0),
         ("白名单放行", own, 0),
         ("模块级 pytestmark 放行", module_mark, 0),
+        ("内存库不算自建库", 'def test_a():\n    e = create_async_engine("sqlite+aiosqlite://")\n', 0),
         ("连接串字面量", literal, 1),
         ("直接构造引擎", engine, 1),
         ("原生 SQL 裸 int ID", raw_sql, 1),
