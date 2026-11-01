@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from . import coverage, gitutil, guard, preflight_gate, runonce, selection
+from . import coverage, gitutil, guard, preflight_gate, selection
 from .config import Config, SelfTest, Step
 from .console import finish, note, out, section
 
@@ -879,9 +879,8 @@ def run_preflight(
         )
         return 2
     if from_push:
-        # 推送入口不套 run_once，但仍要放行预检内部的重命令（pytest / ruff / pyright）：
-        # 注入包装标记，子进程继承后守卫即放行。
-        os.environ[runonce.WRAPPED_ENV] = "1"
+        # 推送入口要放行预检内部的重命令（pytest / ruff / pyright）：注入内部标记，子进程继承后守卫即放行。
+        os.environ[guard.INTERNAL_ENV] = "1"
     try:
         jobs_args(jobs)
     except ValueError as error:

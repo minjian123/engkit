@@ -41,7 +41,7 @@ def _no_guard(monkeypatch: pytest.MonkeyPatch) -> None:
     """绕开重命令拦截（本组用例只验证行尾判定）。"""
     monkeypatch.delenv("CI", raising=False)
     monkeypatch.delenv("GITLAB_CI", raising=False)
-    monkeypatch.delenv("ENGKIT_RUN_ONCE", raising=False)
+    monkeypatch.delenv("ENGKIT_INTERNAL_COMMAND", raising=False)
     monkeypatch.setattr("engkit.guard._checked", False)
 
 

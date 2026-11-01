@@ -197,7 +197,7 @@ def test_audit_fail_open(git_repo: Path, cfg, monkeypatch: pytest.MonkeyPatch) -
 def test_preflight_rejects_dirty(git_repo: Path, cfg, monkeypatch: pytest.MonkeyPatch, capsys) -> None:
     """脏树上预检零步骤执行并记审计（经推送入口调用）。"""
     _no_ci(monkeypatch)
-    monkeypatch.setenv("ENGKIT_RUN_ONCE", "1")
+    monkeypatch.setenv("ENGKIT_INTERNAL_COMMAND", "1")
     (git_repo / "dirty.txt").write_text("x", encoding="utf-8")
     code = preflight.run_preflight(cfg, mode="fast", jobs="off", no_cov=True, no_scope=True, from_push=True)
     assert code == 1
@@ -211,7 +211,7 @@ def test_preflight_rejects_dirty(git_repo: Path, cfg, monkeypatch: pytest.Monkey
 def test_preflight_runs_on_clean(git_repo: Path, cfg, monkeypatch: pytest.MonkeyPatch, capsys) -> None:
     """干净树上经推送入口调用即真跑，并记一条 run 审计。"""
     _no_ci(monkeypatch)
-    monkeypatch.setenv("ENGKIT_RUN_ONCE", "1")
+    monkeypatch.setenv("ENGKIT_INTERNAL_COMMAND", "1")
     code = preflight.run_preflight(cfg, mode="fast", jobs="off", no_cov=True, no_scope=True, from_push=True)
     assert code == 0
     assert "静态：echo" in capsys.readouterr().out

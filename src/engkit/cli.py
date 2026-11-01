@@ -1,7 +1,7 @@
 """命令行入口：`engkit <子命令>`。
 
 子命令：`links` / `docs-scope` / `selection` / `run-selected` / `run-changed` / `coverage` /
-`preflight` / `run_once` / `guard` / `kiwi`。各仓的既有入口脚本只做转发，参数与退出码保持不变。
+`preflight` / `guard` / `kiwi`。各仓的既有入口脚本只做转发，参数与退出码保持不变。
 """
 
 from __future__ import annotations
@@ -11,7 +11,7 @@ import json
 import sys
 from pathlib import Path
 
-from . import coverage, devloop, docs_links, docs_scope, eol, gitutil, guard, kiwi, preflight, push, runonce, selection
+from . import coverage, devloop, docs_links, docs_scope, eol, gitutil, guard, kiwi, preflight, push, selection
 from .config import CONFIG_NAME, Config, ConfigError, load_for
 from .console import configure_stdio, error, out
 
@@ -109,15 +109,6 @@ def _build_parser() -> argparse.ArgumentParser:
     push.add_argument("--jobs", default=preflight.DEFAULT_JOBS, help="并行档位")
     push.add_argument("--budget-seconds", type=float, default=None, help="总体预算（秒）")
     push.add_argument("--step-seconds", type=float, default=None, help="单步预算（秒）")
-
-    once = subparsers.add_parser("run_once", help="重命令包装（缓存回放）")
-    once.add_argument("--force", action="store_true", help="忽略缓存真跑")
-    once.add_argument("--show", action="store_true", help="只看缓存状态，不执行")
-    once.add_argument("--window-seconds", type=int, default=None, help="缓存窗口（秒）")
-    once.add_argument("--cache-dir", default="", help="缓存目录（缺省取配置）")
-    once.add_argument("--root", default="", help="仓库根")
-    once.add_argument("--config", default="", help="配置路径")
-    once.add_argument("argv", nargs=argparse.REMAINDER, help="`--` 之后的命令")
 
     hook = subparsers.add_parser("guard", parents=[common], help="重命令拦截")
     actions = hook.add_subparsers(dest="action", required=True)
@@ -560,34 +551,6 @@ def _cmd_push(args: argparse.Namespace) -> int:
     )
 
 
-def _cmd_run_once(args: argparse.Namespace) -> int:
-    """执行重命令包装。
-
-    Args:
-        args: 解析结果。
-
-    Returns:
-        int: 退出码。
-    """
-    argv = list(args.argv)
-    if argv and argv[0] == "--":
-        argv = argv[1:]
-    if not argv:
-        error("[run_once] 缺少命令：用法 `engkit run_once [选项] -- <命令...>`")
-        return 2
-    cfg = _load(args)
-    cache_dir = Path(args.cache_dir) if args.cache_dir else cfg.root / cfg.runonce.cache_dir
-    window = cfg.runonce.window_seconds if args.window_seconds is None else args.window_seconds
-    return runonce.run(
-        cfg.root,
-        argv,
-        cache_dir=cache_dir,
-        window_seconds=window,
-        force=args.force,
-        show_only=args.show,
-    )
-
-
 def _cmd_guard(args: argparse.Namespace) -> int:
     """执行重命令拦截相关动作。
 
@@ -773,7 +736,6 @@ _HANDLERS = {
     "coverage": _cmd_coverage,
     "preflight": _cmd_preflight,
     "push": _cmd_push,
-    "run_once": _cmd_run_once,
     "guard": _cmd_guard,
     "eol": _cmd_eol,
     "kiwi": _cmd_kiwi,

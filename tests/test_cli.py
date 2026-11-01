@@ -15,8 +15,7 @@ def _no_ci(monkeypatch):
     """默认非 CI、未包装（便于验证拦截路径）。"""
     monkeypatch.delenv("CI", raising=False)
     monkeypatch.delenv("GITLAB_CI", raising=False)
-    monkeypatch.delenv("ENGKIT_RUN_ONCE", raising=False)
-    monkeypatch.delenv("BMS_RUN_ONCE", raising=False)
+    monkeypatch.delenv("ENGKIT_INTERNAL_COMMAND", raising=False)
     monkeypatch.delenv("ENGKIT_ALLOW_UNWRAPPED", raising=False)
     monkeypatch.delenv("ENGKIT_FULL_TESTS_AUTHORIZED", raising=False)
     monkeypatch.delenv("ENGKIT_CONFIG", raising=False)
@@ -207,17 +206,6 @@ def test_preflight_ci(repo: Path, monkeypatch, capsys) -> None:
     monkeypatch.setenv("CI", "1")
     assert cli.main(["preflight", "--root", str(repo), "--fast", "--jobs", "off"]) == 0
     assert "档位：快速" in capsys.readouterr().out
-
-
-def test_run_once(repo: Path, capsys) -> None:
-    """重命令包装：缺命令 / 正常执行 / 只看缓存。"""
-    assert cli.main(["run_once", "--root", str(repo)]) == 2
-    assert "缺少命令" in capsys.readouterr().err
-    cmd = [sys.executable, "-c", "print('wrapped')"]
-    assert cli.main(["run_once", "--root", str(repo), "--", *cmd]) == 0
-    assert "wrapped" in capsys.readouterr().out
-    assert cli.main(["run_once", "--root", str(repo), "--show", "--", *cmd]) == 0
-    assert "缓存命中" in capsys.readouterr().out
 
 
 def test_guard_check(repo: Path, monkeypatch, capsys) -> None:

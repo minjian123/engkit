@@ -23,7 +23,7 @@ def _clean_env(monkeypatch):
         guard.HOOK_ENV,
         guard.HOOK_SKIP_ENV,
         guard._CONFIG_ENV,
-        "ENGKIT_RUN_ONCE",
+        guard.INTERNAL_ENV,
     ):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setattr(guard, "_checked", False)
@@ -36,11 +36,11 @@ def test_is_ci(monkeypatch) -> None:
     assert guard.is_ci() is True
 
 
-def test_is_wrapped(monkeypatch) -> None:
-    """包装标记判定。"""
-    assert guard.is_wrapped() is False
-    monkeypatch.setenv("ENGKIT_RUN_ONCE", "1")
-    assert guard.is_wrapped() is True
+def test_is_internal(monkeypatch) -> None:
+    """内部入口标记判定。"""
+    assert guard.is_internal() is False
+    monkeypatch.setenv(guard.INTERNAL_ENV, "1")
+    assert guard.is_internal() is True
 
 
 def test_allow_flags(monkeypatch) -> None:
@@ -150,14 +150,14 @@ def test_full_test_should_block(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setenv(guard.FULL_AUTH_ENV, "1")
     assert guard.full_test_should_block([], config) is False
     monkeypatch.delenv(guard.FULL_AUTH_ENV)
-    monkeypatch.setenv("ENGKIT_RUN_ONCE", "1")
+    monkeypatch.setenv(guard.INTERNAL_ENV, "1")
     assert guard.full_test_should_block([], config) is True
 
 
 def test_guidance_texts() -> None:
     """提示文案包含包装命令与定向指引。"""
     heavy = guard.heavy_guidance("pytest")
-    assert "engkit run_once" in heavy
+    assert "engkit run-changed" in heavy
     assert guard.ALLOW_ENV in heavy
     full = guard.full_test_guidance()
     assert "engkit run-changed" in full

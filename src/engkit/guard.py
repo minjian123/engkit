@@ -1,11 +1,11 @@
-"""重命令与全量测试拦截（`engkit guard`）：本地非 CI、未经包装跑重命令即报错，命令零执行。
+"""重命令与全量测试拦截（`engkit guard`）：本地非 CI、非内部入口跑重命令即报错，命令零执行。
 
 两条挂接通道共用同一判定：
 
 - **pytest 插件**：`pytest_configure`（由各仓测试插件在最早期转调）；
 - **`.pth` 启动钩子**：解释器启动即判定，覆盖不经过 pytest 的解释器入口（如 pyright 启动器）。
 
-全量测试只在 CI 执行：开发期间（含 `run_once` 包装）跑无目标 / 宽目录 pytest 一律拒绝；
+全量测试只在 CI 执行：开发期间跑无目标 / 宽目录 pytest 一律拒绝；
 推送入口的定向档退化全量由 `ENGKIT_FULL_TESTS_AUTHORIZED` 内部标记放行（不对外公开）。
 
 已知边界：`ruff` 为原生二进制、不经过 Python 解释器，本钩子无法覆盖，其全仓调用靠规范与预检兜底。
@@ -20,10 +20,12 @@ from pathlib import Path
 from typing import Any
 
 from .config import Config, ConfigError, GuardConfig, find_upward, load
-from .runonce import WRAPPED_ENV
 
 ALLOW_ENV = "ENGKIT_ALLOW_UNWRAPPED"
-"""显式绕过包装检查的环境变量（排查包装器自身问题时用）。"""
+"""显式绕过重命令检查的环境变量（仅用于排查守卫误判）。"""
+
+INTERNAL_ENV = "ENGKIT_INTERNAL_COMMAND"
+"""内部标记：本次调用由推送预检等内部入口发起（不对外公开）。"""
 
 FULL_AUTH_ENV = "ENGKIT_FULL_TESTS_AUTHORIZED"
 """内部标记：本次全量测试已由推送入口 / CI 授权（不对外公开，不作为本地逃生口）。"""
@@ -75,13 +77,13 @@ def is_ci() -> bool:
     return any(os.environ.get(name) for name in CI_ENVS)
 
 
-def is_wrapped() -> bool:
-    """本次调用是否经 `engkit run_once` 包装。
+def is_internal() -> bool:
+    """本次调用是否由内部入口（推送预检等）发起。
 
     Returns:
-        bool: 已包装返回 True。
+        bool: 内部入口返回 True。
     """
-    return os.environ.get(WRAPPED_ENV, "").strip() == "1"
+    return _truthy(INTERNAL_ENV)
 
 
 def allow_unwrapped() -> bool:
@@ -227,12 +229,9 @@ def heavy_guidance(kind: str) -> str:
         str: 提示文本。
     """
     return (
-        f"[重命令守卫] 拒绝执行：本地非 CI 环境未经包装跑重命令（{kind}）。\n"
-        "  重命令（分钟级 / 数十秒级）一律经包装调用，避免重复执行与为挑报错重跑：\n"
-        "    engkit run_once -- <原命令>\n"
-        "  包装口径：缓存键 =「命令 + 工作目录 + 工作区指纹」，窗口内命中即回放；\n"
-        "  改完代码想立刻重验加 `--force`，只想看缓存状态用 `--show`。\n"
-        "  单文件 / 单节点调用（秒级）不受此限。\n"
+        f"[重命令守卫] 拒绝执行：本地非 CI 环境跑重命令（{kind}）。\n"
+        "  开发期请只跑改动相关：`engkit run-changed`（或各仓 `测试改动内容.sh`）。\n"
+        "  单文件 / 单节点调用（秒级）不受此限；窄多目录与全仓扫描请走推送预检或 CI。\n"
         f"  确需裸跑请显式声明：{ALLOW_ENV}=1 <原命令>"
     )
 
@@ -247,7 +246,7 @@ def should_block(argv: list[str] | tuple[str, ...], guard: GuardConfig) -> str:
     Returns:
         str: 应拦截返回类别，放行返回空串。
     """
-    if is_ci() or is_wrapped() or allow_unwrapped():
+    if is_ci() or is_internal() or allow_unwrapped():
         return ""
     return classify(argv, guard)
 
@@ -356,7 +355,7 @@ def pytest_configure(config: Any) -> None:
     guard_config = loaded.guard if loaded is not None else GuardConfig()
     if full_test_should_block(args, guard_config):
         raise pytest.UsageError(full_test_guidance())
-    kind = "" if is_ci() or is_wrapped() or allow_unwrapped() else classify(["pytest", *args], guard_config)
+    kind = "" if is_ci() or is_internal() or allow_unwrapped() else classify(["pytest", *args], guard_config)
     if kind:
         raise pytest.UsageError(heavy_guidance(kind))
 

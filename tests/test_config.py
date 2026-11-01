@@ -50,7 +50,6 @@ def test_load_full_config(cfg) -> None:
     assert cfg.frontend_global.prefixes == ("scripts/",)
     assert cfg.guard.scripts == ("check-preflight.py",)
     assert cfg.kiwi.container == "mini-kiwi"
-    assert cfg.runonce.window_seconds == 1800
     assert cfg.preflight.steps[0].label == "静态：echo"
 
 

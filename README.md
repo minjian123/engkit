@@ -16,8 +16,7 @@
 | `engkit coverage` | 覆盖率门禁：合并并行采集数据并判定（行 + 分支） |
 | `engkit preflight` | 预检引擎（**仅 CI 可手动调用**；本地由 `push` 触发） |
 | `engkit push` | 推送入口：档位自动选择（全文档 → 快速档 / 含代码 → 定向档）→ 预检 → 推送 |
-| `engkit run_once` | 重命令包装：同命令同工作区状态下窗口内只真跑一次，命中即回放 |
-| `engkit guard` | 重命令拦截：未包装跑重命令即报错；含 `.pth` 启动钩子安装 / 校验 / 卸载 |
+| `engkit guard` | 重命令拦截：本地跑重命令即报错；含 `.pth` 启动钩子安装 / 校验 / 卸载 |
 | `engkit kiwi` | Kiwi TCMS 用例批量登记与回读（SSH + `manage.py shell`，凭据不入库） |
 
 ## 安装

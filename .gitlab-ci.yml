@@ -30,7 +30,7 @@ variables:
 .setup: &setup
   # pyright 经 pyright-python 拉 node 运行，`python:3.14-slim` 缺 `libatomic.so.1` 会导致 node 启动失败
   # （2026-10-28 实测：`libatomic.so.1: cannot open shared object file`，exit 127）；git 是 eol / gitutil /
-  # runonce / selection 等用例与行尾检查的前提（2026-10-28 实测缺 git 时 15 failed + 25 errors）。apt 走清华镜像
+  # selection 等用例与行尾检查的前提（2026-10-28 实测缺 git 时 15 failed + 25 errors）。apt 走清华镜像
   - sed -i 's|deb.debian.org|mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.list.d/debian.sources
   - apt-get update && apt-get install -y --no-install-recommends git libatomic1
   - pip install --no-cache-dir uv

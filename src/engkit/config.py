@@ -305,19 +305,6 @@ class PushConfig:
 
 
 @dataclass(frozen=True)
-class RunOnceConfig:
-    """重命令回放配置。
-
-    Attributes:
-        cache_dir: 缓存目录（相对仓根）。
-        window_seconds: 回放窗口（秒）。
-    """
-
-    cache_dir: str = ".cache/run_once"
-    window_seconds: int = 1800
-
-
-@dataclass(frozen=True)
 class GuardConfig:
     """重命令拦截配置。
 
@@ -830,7 +817,6 @@ class Config:
         pytest: pytest 执行配置。
         preflight: 预检配置。
         push: 推送入口配置。
-        runonce: 回放配置。
         guard: 重命令拦截配置。
         kiwi: 用例登记配置。
         eol: 行尾护栏配置。
@@ -864,7 +850,6 @@ class Config:
     coverage: CoverageConfig
     pytest: PytestConfig
     preflight: PreflightConfig
-    runonce: RunOnceConfig
     guard: GuardConfig
     kiwi: KiwiConfig
     push: PushConfig = field(default_factory=PushConfig)
@@ -928,7 +913,6 @@ _TOP_KEYS = (
     "coverage",
     "pytest",
     "preflight",
-    "runonce",
     "guard",
     "kiwi",
     "eol",
@@ -2084,13 +2068,6 @@ def parse(raw: dict[str, Any], path: Path) -> Config:
         self_tests=_parse_self_tests(preflight_table, "preflight"),
     )
 
-    runonce_table = _table(raw, "runonce", "runonce")
-    _check_keys(runonce_table, ("cache_dir", "window_seconds"), "runonce")
-    runonce = RunOnceConfig(
-        cache_dir=_string(runonce_table, "cache_dir", "runonce", ".cache/run_once"),
-        window_seconds=int(_scalar(runonce_table, "window_seconds", "runonce", int, 1800)),
-    )
-
     push_table = _table(raw, "push", "push")
     _check_keys(push_table, ("remote", "branch", "doc_globs"), "push")
     push = PushConfig(
@@ -2142,7 +2119,6 @@ def parse(raw: dict[str, Any], path: Path) -> Config:
         coverage=coverage,
         pytest=pytest_config,
         preflight=preflight_config,
-        runonce=runonce,
         guard=guard,
         kiwi=kiwi,
         push=push,

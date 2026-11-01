@@ -82,10 +82,6 @@ self_tests = [
   { label = "自测：echo", cmd = ["{python}", "-c", "print('self')"], deps = ["scripts/tools/guard.py"] },
 ]
 
-[runonce]
-cache_dir = ".cache/run_once"
-window_seconds = 1800
-
 [guard]
 scripts = ["check-preflight.py"]
 repo_dirs = ["libs", "services"]
