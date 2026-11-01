@@ -302,7 +302,8 @@ def _iter_files(root: Path, rule: TestDbIsolationRules, files_from: str) -> list
         return [
             path
             for path in candidates
-            if any(path.startswith(f"{root_dir.strip('/')}/") for root_dir in rule.scan_targets)
+            if (root / path).is_file()
+            and any(path.startswith(f"{root_dir.strip('/')}/") for root_dir in rule.scan_targets)
         ]
     files: list[str] = []
     for target in rule.scan_targets:
