@@ -763,6 +763,7 @@ class TestDbIsolationRules:
         id_columns: 原生 SQL 里按 ID 过滤的列名（绑定 int 常量即违规）。
         cleanup_calls: 全表清理调用名（`drop_all` 等，无白名单即违规）。
         exclude_parts: 剪枝目录名。
+        base_modules: 共享测试基座模块（相对仓根；这类模块的职责就是建库，不参与判定）。
     """
 
     scan_targets: tuple[str, ...]
@@ -773,6 +774,7 @@ class TestDbIsolationRules:
     id_columns: tuple[str, ...] = ("id",)
     cleanup_calls: tuple[str, ...] = ("drop_all",)
     exclude_parts: tuple[str, ...] = ("__pycache__", ".venv", "node_modules", ".git")
+    base_modules: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -1817,6 +1819,7 @@ def _parse_test_db_isolation_rules(table: dict[str, Any], where: str) -> TestDbI
             "id_columns",
             "cleanup_calls",
             "exclude_parts",
+            "base_modules",
         ),
         where,
     )
@@ -1829,6 +1832,7 @@ def _parse_test_db_isolation_rules(table: dict[str, Any], where: str) -> TestDbI
         id_columns=_strings(table, "id_columns", where, ("id",)),
         cleanup_calls=_strings(table, "cleanup_calls", where, ("drop_all",)),
         exclude_parts=_strings(table, "exclude_parts", where, ("__pycache__", ".venv", "node_modules", ".git")),
+        base_modules=_strings(table, "base_modules", where, ()),
     )
 
 

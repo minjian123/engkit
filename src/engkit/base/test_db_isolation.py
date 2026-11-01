@@ -68,6 +68,43 @@ def _marker_reason(node: ast.AST, marker: str) -> str:
     return ""
 
 
+def _pytestmark_reason(tree: ast.Module, marker: str) -> str:
+    """模块级 `pytestmark = [pytest.mark.<marker>("理由")]` 的理由。
+
+    为什么需要：`pytestmark` 是给整份文件打标的标准写法（比逐函数装饰器更少重复），
+    只在装饰器上判白名单会把这类文件误判成违规。与装饰器同一口径：理由必填。
+
+    Args:
+        tree: 模块 AST。
+        marker: 白名单 marker 名（如 `own_db`）。
+
+    Returns:
+        str: 理由；未打标或理由非字符串字面量时返回空串。
+    """
+    for node in tree.body:
+        if isinstance(node, ast.Assign):
+            targets = node.targets
+            value = node.value
+        elif isinstance(node, ast.AnnAssign):
+            targets = [node.target]
+            value = node.value
+        else:
+            continue
+        if value is None or not any(isinstance(target, ast.Name) and target.id == "pytestmark" for target in targets):
+            continue
+        elements = value.elts if isinstance(value, (ast.List, ast.Tuple)) else [value]
+        for element in elements:
+            if not isinstance(element, ast.Call):
+                continue
+            target = element.func
+            if not (isinstance(target, ast.Attribute) and target.attr == marker):
+                continue
+            for arg in element.args:
+                if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+                    return arg.value
+    return ""
+
+
 def _call_name(node: ast.AST) -> str:
     """取调用名（支持 `mod.func()` 与 `func()`）。
 
@@ -129,6 +166,8 @@ class _Scanner(ast.NodeVisitor):
             node: 模块 / 类 / 函数节点。
         """
         allowed = _is_allowed(node, self.rule.allow_marker)
+        if not allowed and isinstance(node, ast.Module):
+            allowed = bool(_pytestmark_reason(node, self.rule.allow_marker))
         self._allowed += 1 if allowed else 0
         self.generic_visit(node)
         self._allowed -= 1 if allowed else 0
@@ -272,6 +311,9 @@ def collect_own_db(rel_path: str, text: str, rule: TestDbIsolationRules) -> list
     except SyntaxError:
         return []
     entries: list[str] = []
+    module_reason = _pytestmark_reason(tree, rule.allow_marker)
+    if module_reason:
+        entries.append(f"{rel_path}::<module>::{module_reason}")
     for node in ast.walk(tree):
         if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             continue
@@ -299,13 +341,19 @@ def _iter_files(root: Path, rule: TestDbIsolationRules, files_from: str) -> list
             for line in read_text(Path(files_from)).splitlines()
             if line.strip().endswith(".py")
         ]
+        # 只判**用例文件**（`test_*.py`）：与全量模式同一命名判据，两种模式结论必须一致
+        # （`tests_support/` 下的共享测试基座本来就不在用例文件之列，其建库职责由
+        # `base_modules` 显式声明，不靠文件名隐藏）。
         return [
             path
             for path in candidates
             if (root / path).is_file()
+            and Path(path).name.startswith("test_")
+            and path not in set(rule.base_modules)
             and any(path.startswith(f"{root_dir.strip('/')}/") for root_dir in rule.scan_targets)
         ]
     files: list[str] = []
+    base_modules = set(rule.base_modules)
     for target in rule.scan_targets:
         base = root / target
         if not base.exists():
@@ -313,7 +361,10 @@ def _iter_files(root: Path, rule: TestDbIsolationRules, files_from: str) -> list
         for path in sorted(base.rglob("test_*.py")):
             if set(path.relative_to(root).parts) & set(rule.exclude_parts):
                 continue
-            files.append(path.relative_to(root).as_posix())
+            rel = path.relative_to(root).as_posix()
+            if rel in base_modules:
+                continue
+            files.append(rel)
     return files
 
 
@@ -340,9 +391,15 @@ def self_test(rule: TestDbIsolationRules) -> int:
     cache_delete = "def test_e(cache):\n    cache.delete('k')\n"
     sql_delete = "from sqlalchemy import delete\n\n\ndef test_f(meta, table):\n    meta.execute(delete(table))\n"
     commented = "# create_async_engine('sqlite+aiosqlite:///x.db')\nDOC = 'delete() 与 drop_all() 的说明'\n"
+    module_mark = (
+        "import pytest\n\n"
+        'pytestmark = [pytest.mark.own_db("整份文件的建库即被测")]\n\n\n'
+        "def test_a():\n    e = create_async_engine('x')\n"
+    )
     vectors: list[tuple[str, str, int]] = [
         ("合规样本", good, 0),
         ("白名单放行", own, 0),
+        ("模块级 pytestmark 放行", module_mark, 0),
         ("连接串字面量", literal, 1),
         ("直接构造引擎", engine, 1),
         ("原生 SQL 裸 int ID", raw_sql, 1),

@@ -62,8 +62,8 @@ def test_run_full_scan_and_incremental(tmp_path: Path, capsys: pytest.CaptureFix
     assert "通过" in capsys.readouterr().out
 
     changed.write_text("src/tests/helper.py\n", encoding="utf-8")
-    assert test_db_isolation.run(cfg, files_from=str(changed)) == 1
-    assert "helper.py" in capsys.readouterr().out
+    assert test_db_isolation.run(cfg, files_from=str(changed)) == 0
+    assert "通过" in capsys.readouterr().out
 
 
 def test_run_clean_and_self_test(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -151,6 +151,48 @@ def test_cleanup(meta, table, cache):
     meta.execute(delete(table))
     cache.delete("k")
 '''
+
+
+def test_module_pytestmark_and_base_modules(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """模块级 `pytestmark` 放行；共享基座模块（`base_modules`）不参与判定。"""
+    module_mark = (
+        "import pytest\n\n"
+        'pytestmark = [\n    pytest.mark.kiwi_id(1),\n    pytest.mark.own_db("整份文件的建库即被测"),\n]\n\n\n'
+        "def test_a(tmp_path):\n    e = create_async_engine('x')\n"
+    )
+    plain_mark = (
+        "import pytest\n\npytestmark = pytest.mark.kiwi_id(1)\n\n\ndef test_b(tmp_path):\n    p = tmp_path / 'x.db'\n"
+    )
+    no_arg_mark = (
+        "import pytest\n\npytestmark = [pytest.mark.own_db()]\n\n\ndef test_c(tmp_path):\n    p = tmp_path / 'x.db'\n"
+    )
+    annotated = (
+        "import pytest\n\npytestmark: list[object] = [pytest.mark.own_db('标注式')]\n\n\ndef test_d():\n    pass\n"
+    )
+    non_call_element = "import pytest\n\npytestmark = [1]\n"
+    non_str_reason = "import pytest\n\npytestmark = [pytest.mark.own_db(123)]\n"
+    rule = config(tmp_path).test_db_isolation_rules
+    assert rule is not None
+
+    assert test_db_isolation.scan_text("src/tests/test_mod.py", module_mark, rule) == []
+    assert test_db_isolation.collect_own_db("src/tests/test_mod.py", module_mark, rule) == [
+        "src/tests/test_mod.py::<module>::整份文件的建库即被测"
+    ]
+    assert test_db_isolation._pytestmark_reason(ast.parse(plain_mark), "own_db") == ""
+    assert test_db_isolation._pytestmark_reason(ast.parse(no_arg_mark), "own_db") == ""
+    assert test_db_isolation._pytestmark_reason(ast.parse(annotated), "own_db") == "标注式"
+    assert test_db_isolation._pytestmark_reason(ast.parse(GOOD), "own_db") == ""
+    assert test_db_isolation._pytestmark_reason(ast.parse(non_call_element), "own_db") == ""
+    assert test_db_isolation._pytestmark_reason(ast.parse(non_str_reason), "own_db") == ""
+    assert len(test_db_isolation.scan_text("src/tests/test_plain.py", plain_mark, rule)) == 1
+
+    write(tmp_path, {"src/tests/test_base.py": BAD, "src/tests/test_other.py": BAD})
+    scoped = replace(rule, base_modules=("src/tests/test_base.py",))
+    assert test_db_isolation._iter_files(tmp_path, scoped, "") == ["src/tests/test_other.py"]
+    changed = tmp_path / "changed.txt"
+    changed.write_text("src/tests/test_base.py\nsrc/tests/test_other.py\n", encoding="utf-8")
+    assert test_db_isolation._iter_files(tmp_path, scoped, str(changed)) == ["src/tests/test_other.py"]
+    capsys.readouterr()
 
 
 def test_edge_branches(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
