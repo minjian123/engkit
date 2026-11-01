@@ -232,8 +232,24 @@ def test_run_selected_no_tests(cfg) -> None:
 
 def test_run_selected_bad_ref(cfg) -> None:
     """基准不可解析 ⇒ 退化全量并按退化集执行。"""
-    code = preflight.run_selected(cfg, changed_from="no-such-ref", pytest_cmd=PASS_CMD, cov=False)
+    code = preflight.run_selected(cfg, changed_from="no-such-ref", pytest_cmd=PASS_CMD, cov=False, allow_full=True)
     assert code == 0
+    assert preflight.run_selected(cfg, changed_from="no-such-ref", pytest_cmd=PASS_CMD, cov=False) == 2
+
+
+def test_run_selected_local_rejects_degraded(cfg, monkeypatch) -> None:
+    """本地非授权调用若仍推导出退化全量 ⇒ 拒绝执行。"""
+    degraded = preflight.selection.Selection(
+        test_paths=tuple(),
+        cov_modules=(),
+        degraded=True,
+        reason="全局配置 ⇒ 全量",
+        picked=1,
+        total=1,
+        projects=(),
+    )
+    monkeypatch.setattr(preflight.selection, "build_selection", lambda *a, **k: degraded)
+    assert preflight.run_selected(cfg, changed=["backend/pyproject.toml"]) == 2
 
 
 def test_run_selected_no_backend(tmp_path: Path) -> None:
@@ -359,8 +375,18 @@ def test_run_selected_full_retried(cfg, monkeypatch) -> None:
         changed=["backend/libs/pkg_a/src/pkg_a/util.py"],
         pytest_cmd=PASS_CMD,
         force_full=True,
+        allow_full=True,
     )
     assert code == 1
+    assert (
+        preflight.run_selected(
+            cfg,
+            changed=["backend/libs/pkg_a/src/pkg_a/util.py"],
+            pytest_cmd=PASS_CMD,
+            force_full=True,
+        )
+        == 2
+    )
 
 
 def test_run_scoped_step(cfg, monkeypatch) -> None:
@@ -439,6 +465,32 @@ def test_run_full_and_project_tests(cfg, monkeypatch) -> None:
     preflight.run_project_tests(cfg, budget, failures, jobs="off")
     assert any("聚合全量" in item for item in calls)
     assert any("工程级范围" in item for item in calls)
+    assert failures == []
+
+
+def test_run_full_tests_local_skips(cfg, monkeypatch) -> None:
+    """本地非 CI 不跑聚合全量。"""
+    for name in guard.CI_ENVS:
+        monkeypatch.delenv(name, raising=False)
+    calls: list[str] = []
+    monkeypatch.setattr(preflight, "execute", lambda label, *a, **k: calls.append(label) or True)
+    budget = preflight.Budget(step_seconds=30, total_seconds=30)
+    failures: list[str] = []
+    preflight.run_full_tests(cfg, budget, failures, jobs="off", no_cov=False)
+    assert calls == []
+    assert failures == []
+
+
+def test_run_project_tests_local_skips(cfg, monkeypatch) -> None:
+    """本地非 CI 不跑工程级全量。"""
+    for name in guard.CI_ENVS:
+        monkeypatch.delenv(name, raising=False)
+    calls: list[str] = []
+    monkeypatch.setattr(preflight, "execute", lambda label, *a, **k: calls.append(label) or True)
+    budget = preflight.Budget(step_seconds=30, total_seconds=30)
+    failures: list[str] = []
+    preflight.run_project_tests(cfg, budget, failures, jobs="off")
+    assert calls == []
     assert failures == []
 
 

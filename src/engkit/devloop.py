@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import os
 import shlex
 import shutil
 import subprocess
@@ -23,12 +24,13 @@ _LINT_CHUNK = 50
 """ruff 单批文件数（避免命令行过长）。"""
 
 
-def _exec(argv: list[str], cwd: Path) -> int:
+def _exec(argv: list[str], cwd: Path, *, env: dict[str, str] | None = None) -> int:
     """执行子进程（输出直通终端）。
 
     Args:
         argv: 命令与参数（首项按 `PATH` + `PATHEXT` 解析，兼容 Windows 的 `.cmd`）。
         cwd: 工作目录。
+        env: 子进程环境变量（缺省继承当前环境）。
 
     Returns:
         int: 退出码（不可执行时返回 1）。
@@ -37,7 +39,7 @@ def _exec(argv: list[str], cwd: Path) -> int:
     out(f"  $ {shown}")
     resolved = shutil.which(argv[0]) or argv[0]
     try:
-        return subprocess.run([resolved, *argv[1:]], cwd=cwd, check=False).returncode
+        return subprocess.run([resolved, *argv[1:]], cwd=cwd, check=False, env=env).returncode
     except OSError as exc:
         error(f"  执行失败：{exc}")
         return 1
@@ -107,7 +109,9 @@ def _frontend_changed(cfg: Config, changed: list[str]) -> int:
     out(f"[devloop] 前端：{'、'.join(picked.packages)}")
     for package in picked.packages:
         argv = [token.replace("{package}", package) for token in shlex.split(cfg.frontend.test_cmd)]
-        code = _exec(argv, cfg.root)
+        # 内部标记：本次已由变更选测选中 ⇒ vitest 全量守卫放行该包的整套用例
+        env = {**os.environ, "ENGKIT_VITEST_SELECTED": package}
+        code = _exec(argv, cfg.root, env=env)
         if code != 0:
             return code
     return 0

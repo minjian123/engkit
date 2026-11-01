@@ -18,6 +18,7 @@ def _no_ci(monkeypatch):
     monkeypatch.delenv("ENGKIT_RUN_ONCE", raising=False)
     monkeypatch.delenv("BMS_RUN_ONCE", raising=False)
     monkeypatch.delenv("ENGKIT_ALLOW_UNWRAPPED", raising=False)
+    monkeypatch.delenv("ENGKIT_FULL_TESTS_AUTHORIZED", raising=False)
     monkeypatch.delenv("ENGKIT_CONFIG", raising=False)
     monkeypatch.setattr("engkit.guard._checked", False)
 
@@ -168,6 +169,12 @@ def test_run_selected_command(repo: Path, capsys) -> None:
     """定向执行器：无受影响测试即 0。"""
     assert cli.main(["run-selected", "--root", str(repo), "--changed-file", "docs/文档首页.md"]) == 0
     assert "跳过 pytest" in capsys.readouterr().out
+
+
+def test_run_selected_force_full_local_rejected(repo: Path, capsys) -> None:
+    """本地非 CI 不接受 `--force-full`。"""
+    assert cli.main(["run-selected", "--root", str(repo), "--force-full"]) == 2
+    assert "全量测试只由 CI 执行" in capsys.readouterr().err
 
 
 def test_coverage_command(tmp_path: Path, capsys) -> None:

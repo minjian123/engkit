@@ -263,6 +263,7 @@ def test_preflight_selection_without_tests(build_repo) -> None:
 
 def test_preflight_full_tests_without_plugin(cfg, monkeypatch) -> None:
     """未配置采集插件时不追加 `-p`。"""
+    monkeypatch.setenv("CI", "1")
     calls: list[str] = []
     monkeypatch.setattr(preflight, "execute", lambda label, *a, **k: calls.append(label) or True)
     patched = dataclasses.replace(cfg, coverage=dataclasses.replace(cfg.coverage, plugin=""))

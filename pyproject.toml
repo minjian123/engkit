@@ -61,7 +61,8 @@ reportUnknownArgumentType = false
 reportUnknownParameterType = false
 
 [tool.pytest.ini_options]
-addopts = "--import-mode=importlib --basetemp=.cache/pytest"
+# `-p engkit.coverage_plugin`：本仓自身也走同一套重命令 / 全量测试守卫（开发时不跑全量）
+addopts = "--import-mode=importlib -p engkit.coverage_plugin --basetemp=.cache/pytest"
 testpaths = ["tests"]
 # `tests` 自身也在路径上：各用例文件共用 `base_fixtures`（规则段样例与迷你仓库构造）
 pythonpath = ["src", "tests"]

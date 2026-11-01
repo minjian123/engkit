@@ -59,7 +59,7 @@ def _build_parser() -> argparse.ArgumentParser:
     selected.add_argument("--changed-from", default="", help="对比基准")
     selected.add_argument("--changed-file", action="append", default=[], help="显式变更文件（可重复）")
     selected.add_argument("--changed-file-list", default="", help="变更清单文件")
-    selected.add_argument("--force-full", action="store_true", help="强制退化全量")
+    selected.add_argument("--force-full", action="store_true", help="强制退化全量（仅 CI 可用）")
     selected.add_argument("--pytest-cmd", default="", help="执行器前缀（缺省取配置）")
     selected.add_argument("--pytest-cwd", default="", help="工作目录（缺省取配置）")
     selected.add_argument("--pytest-arg", action="append", default=[], help="透传 pytest 参数")
@@ -93,7 +93,7 @@ def _build_parser() -> argparse.ArgumentParser:
     pre = subparsers.add_parser("preflight", parents=[common], help="预检引擎（仅 CI 可手动调用；本地走 push）")
     mode = pre.add_mutually_exclusive_group()
     mode.add_argument("--fast", action="store_true", help="快速档（只静态 + 护栏，无参即本档）")
-    mode.add_argument("--full", action="store_true", help="全量档")
+    mode.add_argument("--full", action="store_true", help="全量静态 + 定向用例（全量测试仅 CI）")
     pre.add_argument("--no-scope", action="store_true", help="全量档跳过逐工程范围")
     pre.add_argument("--no-cov", action="store_true", help="跳过覆盖率门禁")
     pre.add_argument("--jobs", default=preflight.DEFAULT_JOBS, help="并行档位")
@@ -103,7 +103,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     push = subparsers.add_parser("push", parents=[common], help="推送入口：预检通过后自动推送")
     push.add_argument("--check", action="store_true", help="只跑预检、不推送")
-    push.add_argument("--full", action="store_true", help="全量档（缺省按变更自动选档）")
+    push.add_argument("--full", action="store_true", help="全量静态 + 定向用例（缺省按变更自动选档；全量测试只在 CI）")
     push.add_argument("--remote", default="", help="远端名（缺省取配置）")
     push.add_argument("--branch", default="", help="目标分支（缺省取配置或当前分支）")
     push.add_argument("--jobs", default=preflight.DEFAULT_JOBS, help="并行档位")
@@ -351,7 +351,7 @@ def _cmd_selection(args: argparse.Namespace) -> int:
             changed_file_list=args.changed_file_list,
         )
     except RuntimeError as exc:
-        error(f"[test-selection] {exc}（确需全量请加 --force-full）")
+        error(f"[test-selection] {exc}（确需全量请交 CI；--force-full 仅用于推导）")
         return 1
     if args.format == "changed-services":
         services = (
@@ -442,6 +442,10 @@ def _cmd_run_selected(args: argparse.Namespace) -> int:
         int: 退出码。
     """
     cfg = _load(args)
+    if args.force_full and not guard.is_ci():
+        error("[test-selection] 拒绝执行：本地不允许强制全量（全量测试只由 CI 执行）。")
+        error("  开发中改完即测请用：engkit run-changed")
+        return 2
     return preflight.run_selected(
         cfg,
         changed_from=args.changed_from,
@@ -458,6 +462,7 @@ def _cmd_run_selected(args: argparse.Namespace) -> int:
         pytest_args=tuple(args.pytest_arg),
         report_path=args.cov_json,
         depth=args.depth,
+        allow_full=guard.is_ci(),
     )
 
 

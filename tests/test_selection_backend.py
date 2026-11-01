@@ -161,6 +161,14 @@ def test_selection_force_full(cfg) -> None:
     assert "强制退化全量" in result.reason
 
 
+def test_selection_no_degrade_for_devloop(cfg) -> None:
+    """开发环（`allow_degrade=False`）遇全局变更只跑直接相关用例，不退化全量。"""
+    result = _selection(cfg, ["backend/pyproject.toml"], allow_degrade=False)
+    assert result.degraded is False
+    assert result.reason == ""
+    assert any("只跑直接相关" in item for item in result.notes)
+
+
 def test_selection_threshold_degrade(cfg) -> None:
     """超过基础模块阈值退化工程级全量。"""
     result = _selection(cfg, ["backend/libs/pkg_a/src/pkg_a/util.py"], base_threshold=1)

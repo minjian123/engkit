@@ -627,6 +627,7 @@ def build_selection(
     base_ratio: float | None = None,
     force_full: bool = False,
     depth: str = "",
+    allow_degrade: bool = True,
 ) -> Selection:
     """按变更路径推导后端选测结果。
 
@@ -637,6 +638,8 @@ def build_selection(
         base_ratio: 基础模块占比阈值（缺省取配置）。
         force_full: 强制退化全量。
         depth: 依赖深度（`closure` 传递闭包 / `direct` 直接依赖；空串取配置）。
+        allow_degrade: 是否允许退化为全量（开发环传 False：全局变更只跑直接相关用例，
+            全量交推送入口 / CI）。
 
     Returns:
         Selection: 选测结果。
@@ -682,13 +685,15 @@ def build_selection(
             module for rel in changed_set for module in [module_of_source(rel, project)] if module
         }
         selected: set[str] = {rel for rel in files if f"{backend_prefix}/{rel}" in changed_set}
-        if global_change:
+        if global_change and allow_degrade:
             selected.update(files)
             if total:
                 degraded = True
                 if "全局配置 / 迁移 / 部署变更 ⇒ 全量" not in reasons:
                     reasons.append("全局配置 / 迁移 / 部署变更 ⇒ 全量")
         else:
+            if global_change:
+                notes.append("全局配置 / 迁移 / 部署变更：开发环只跑直接相关用例（全量交推送入口 / CI）")
             for rel in changed_set:
                 selected.update(_isomorphic_candidates(backend, rel, project, test_prefix))
             if modules:
@@ -699,12 +704,16 @@ def build_selection(
                         selected.add(test_rel)
             project_degraded = False
             if modules and not selected:
-                if mode == "direct":
+                if mode == "direct" or not allow_degrade:
                     notes.append(f"{project.name}：变更模块无测试命中 ⇒ 本次跳过该工程（缺测交推送前预检）")
                 else:
                     project_degraded = True
                     notes.append(f"{project.name}：变更模块无测试引用者 ⇒ 退化工程级全量")
-            if mode != "direct" and (len(selected) > threshold or (total and len(selected) / total > ratio_limit)):
+            if (
+                allow_degrade
+                and mode != "direct"
+                and (len(selected) > threshold or (total and len(selected) / total > ratio_limit))
+            ):
                 project_degraded = True
                 notes.append(
                     f"{project.name}：受影响测试 {len(selected)}/{total} 超过基础模块阈值"

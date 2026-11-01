@@ -196,6 +196,8 @@ def expand(cfg: Config, cmd: tuple[str, ...]) -> list[str]:
 def step_applies(step: Step, mode: str) -> bool:
     """步骤是否在当前档位执行。
 
+    全量档同时执行 `scoped` 步骤：本地 `push --full` 仍要跑定向用例（全量测试只由 CI 执行）。
+
     Args:
         step: 步骤。
         mode: 档位（`scoped` / `fast` / `full`）。
@@ -203,7 +205,11 @@ def step_applies(step: Step, mode: str) -> bool:
     Returns:
         bool: 适用返回 True。
     """
-    return step.preset == "always" or step.preset == mode
+    if step.preset == "always":
+        return True
+    if mode == "full":
+        return step.preset in ("full", "scoped")
+    return step.preset == mode
 
 
 def _resolve_cwd(cfg: Config, rel: str) -> Path:
@@ -515,6 +521,7 @@ def run_selected(
     pytest_args: tuple[str, ...] = (),
     report_path: str = "",
     depth: str = "",
+    allow_full: bool = False,
 ) -> int:
     """推导 → 跑 pytest → 覆盖率判定 → 扩圈 → 退化 → 度量。
 
@@ -535,10 +542,15 @@ def run_selected(
         pytest_args: 透传 pytest 参数。
         report_path: 覆盖率报告落点（相对仓根；缺省 `<数据文件>.json`）。
         depth: 依赖深度（空串取配置；预检固定传 `closure`）。
+        allow_full: 是否允许退化 / 强制全量（仅推送入口与 CI 传 True；开发环恒 False）。
 
     Returns:
-        int: pytest 退出码 / 覆盖率或推导异常 1 / 超时 124。
+        int: pytest 退出码 / 覆盖率或推导异常 1 / 超时 124 / 本地要求全量 2。
     """
+    if force_full and not allow_full:
+        print("[test-selection] 拒绝执行：本地不允许强制全量（全量测试只由 CI 执行）。", file=sys.stderr)
+        print("  开发中改完即测请用：engkit run-changed", file=sys.stderr)
+        return 2
     try:
         parallel = parallel_args(cfg, jobs)
     except ValueError as error:
@@ -555,16 +567,22 @@ def run_selected(
                 changed_file_list=changed_file_list,
             )
         except RuntimeError as error:
+            if not allow_full:
+                print(f"[test-selection] {error}；本地不允许退化全量（全量测试只由 CI 执行）。", file=sys.stderr)
+                return 2
             out(f"[test-selection] {error} ⇒ 显式退化全量")
             changed = []
             force_full = True
     try:
-        result = selection.build_selection(cfg, changed, force_full=force_full, depth=depth)
+        result = selection.build_selection(cfg, changed, force_full=force_full, depth=depth, allow_degrade=allow_full)
     except RuntimeError as error:
         print(f"[test-selection] {error}", file=sys.stderr)
         return 1
     if result.reason:
         out(f"[test-selection] 退化：{result.reason}")
+    if not allow_full and result.degraded and result.picked:
+        print("[test-selection] 拒绝执行：本地不允许退化全量（全量测试只由 CI 执行）。", file=sys.stderr)
+        return 2
     for item in result.notes:
         out(f"[test-selection] 说明：{item}")
     if result.total:
@@ -588,6 +606,9 @@ def run_selected(
     report = (cfg.root / (report_path or f"{cfg.coverage.data_file}.json")).resolve()
     workdir = cfg.root / (pytest_cwd or cfg.pytest.cwd)
     env = _coverage_env(cfg, cov_modules, workdir) if cov_enabled else dict(os.environ)
+    if allow_full:
+        # 内部标记：推送入口 / CI 授权本次跑全量（开发环不设，pytest 守卫据此拦截）
+        env[guard.FULL_AUTH_ENV] = "1"
     if cov_enabled:
         out(f"[test-selection] 覆盖率采集：{data_file}（source={env[cfg.coverage.source_env]}）")
     rounds = 0
@@ -694,7 +715,15 @@ def _run_scoped_step(
     sink: list[str] = []
     out("\n[engkit] 后端测试：定向（选测 + 覆盖率门禁 + 扩圈）")
     with contextlib.redirect_stdout(Tee(sys.stdout, sink)):
-        code = run_selected(cfg, changed=changes, jobs=jobs, cov=not no_cov, timeout=limit, depth="closure")
+        code = run_selected(
+            cfg,
+            changed=changes,
+            jobs=jobs,
+            cov=not no_cov,
+            timeout=limit,
+            depth="closure",
+            allow_full=True,
+        )
     summary = metrics_summary(sink)
     if summary:
         out(f"[engkit] 选测度量：{summary}")
@@ -712,13 +741,17 @@ def run_full_tests(cfg: Config, budget: Budget, failures: list[str], *, jobs: st
         jobs: 并行档位。
         no_cov: 是否跳过覆盖率门禁。
     """
+    if not guard.is_ci():
+        out("\n[engkit] 全量测试：跳过（本地不跑全量，只由 CI 执行）")
+        return
     workdir = cfg.root / cfg.pytest.cwd
     argv = [*shlex.split(cfg.pytest.cmd), "-q"]
-    env = dict(os.environ)
+    env = {**os.environ, guard.FULL_AUTH_ENV: "1"}
     if not no_cov:
         packages = list(cfg.backend.coverage_packages) if cfg.backend is not None else []
         coverage.cleanup((cfg.root / cfg.coverage.data_file).resolve())
         env = _coverage_env(cfg, packages, workdir)
+        env[guard.FULL_AUTH_ENV] = "1"
         if cfg.coverage.plugin:
             argv.extend(["-p", cfg.coverage.plugin])
         out(f"\n[engkit] 覆盖率采集：{env[cfg.coverage.data_env]}（source={env[cfg.coverage.source_env]}）")
@@ -748,9 +781,20 @@ def run_project_tests(cfg: Config, budget: Budget, failures: list[str], *, jobs:
     """
     if cfg.backend is None:
         return
+    if not guard.is_ci():
+        out("\n[engkit] 工程级全量测试：跳过（本地不跑全量，只由 CI 执行）")
+        return
+    env = {**os.environ, guard.FULL_AUTH_ENV: "1"}
     argv = [*shlex.split(cfg.pytest.cmd), "-q", *parallel_args(cfg, jobs)]
     for rel in cfg.backend.projects:
-        execute(f"后端测试：工程级范围（{rel}）", argv, cfg.root / cfg.backend.root / rel, budget, failures)
+        execute(
+            f"后端测试：工程级范围（{rel}）",
+            argv,
+            cfg.root / cfg.backend.root / rel,
+            budget,
+            failures,
+            env=env,
+        )
 
 
 def self_test(cfg: Config) -> int:
@@ -787,10 +831,10 @@ def self_test(cfg: Config) -> int:
 
 
 def resolve_mode(*, full: bool) -> str:
-    """解析预检档位（本地只用快速档与全量档；定向档由推送入口按变更自动选择）。
+    """解析预检档位（缺省快速档；显式申请全量档；定向档由推送入口按变更自动选择）。
 
     Args:
-        full: 是否显式申请全量档。
+        full: 是否显式申请全量档（全量静态 + 定向用例；全量测试只由 CI 执行）。
 
     Returns:
         str: 档位（`fast` / `full`）。
@@ -855,7 +899,10 @@ def run_preflight(
         step_seconds=default_step if step_seconds is None else step_seconds,
         total_seconds=default_total if budget_seconds is None else budget_seconds,
     )
-    label = {"full": "全量（显式 --full）", "fast": "快速（只静态）"}.get(mode, "定向（快路径；全量请显式 --full）")
+    label = {
+        "full": "全量静态 + 定向用例（显式 --full；全量测试只在 CI）",
+        "fast": "快速（只静态）",
+    }.get(mode, "定向（快路径；全量请显式 --full）")
     out(f"[engkit] 档位：{label}")
     out(
         f"[engkit] 预算护栏：单步 {budget.step_seconds:.0f}s / 总体 {budget.total_seconds:.0f}s"
@@ -867,6 +914,9 @@ def run_preflight(
         if not step_applies(step, mode):
             continue
         if step.type == "scoped_tests":
+            if mode == "full" and guard.is_ci():
+                # CI 全量档只跑全量用例，避免与定向档重复
+                continue
             changes, _ = _changes(cfg)
             _run_scoped_step(cfg, budget, failures, jobs=jobs, no_cov=no_cov, changes=changes)
             continue

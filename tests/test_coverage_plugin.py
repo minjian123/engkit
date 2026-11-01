@@ -110,13 +110,11 @@ def test_stop_idempotent(monkeypatch) -> None:
 
 
 def test_hooks_delegate(monkeypatch) -> None:
-    """三个 pytest 钩子转调守卫（不另写实现）。"""
+    """pytest 钩子转调守卫（不另写实现）。"""
     calls: list[str] = []
-    monkeypatch.setattr(guard, "pytest_addoption", lambda parser: calls.append(f"addoption:{parser}"))
     monkeypatch.setattr(guard, "pytest_configure", lambda config: calls.append(f"configure:{config}"))
-    coverage_plugin.pytest_addoption("parser")
     coverage_plugin.pytest_configure("config")
-    assert calls == ["addoption:parser", "configure:config"]
+    assert calls == ["configure:config"]
 
 
 def test_ensure_basetemp_parent_creates_parent(tmp_path: Path) -> None:

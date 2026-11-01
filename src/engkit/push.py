@@ -20,7 +20,7 @@ MODE_SCOPED = "scoped"
 """代码改动档位：静态 + 定向用例 + 覆盖率门禁。"""
 
 MODE_FULL = "full"
-"""全量档位（显式申请）。"""
+"""全量档位（显式申请）：全量静态 + 全部自测 + 定向用例；全量测试只由 CI 执行。"""
 
 
 def is_doc(path: str, globs: tuple[str, ...]) -> bool:
@@ -79,7 +79,7 @@ def _describe(mode: str, commits: list[str], files: list[str], known: bool) -> s
         str: 说明文本。
     """
     if mode == MODE_FULL:
-        return "[push] 档位：全量（显式 --full）"
+        return "[push] 档位：全量静态 + 定向用例（显式 --full；全量测试只由 CI 执行）"
     scope = f"待推 {len(commits)} 个提交、涉及 {len(files)} 个文件"
     if not known:
         return f"[push] 档位：定向（远端无该分支，按代码改动处理；{scope}）"
@@ -104,7 +104,7 @@ def run_push(
     Args:
         cfg: 仓配置。
         check: 只跑预检、不推送。
-        full: 全量档（隐含定向档的全部步骤 + 全量用例）。
+        full: 全量档（全量静态 + 全部自测 + 定向用例；不含全量测试）。
         remote: 远端名（空串取配置）。
         branch: 目标分支（空串取配置或当前分支）。
         jobs: 并行档位。

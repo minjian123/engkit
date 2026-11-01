@@ -40,6 +40,8 @@ doc_globs = ["*.md", "*.txt", "*.png", "*.jpg", "*.jpeg", "*.gif", "*.svg", "*.w
 scripts = []
 repo_dirs = ["src", "tests"]
 dir_test_threshold = 20
+# 一律视为全量测试的目录前缀（命中即拦，不受文件数阈值影响）
+full_test_dirs = ["tests/integration"]
 
 [kiwi]
 env_file = "deploy/.env"

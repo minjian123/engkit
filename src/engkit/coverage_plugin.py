@@ -9,7 +9,7 @@
 - 导入即按仓配置声明的环境变量启动采集（`[coverage].data_env` 给数据文件基址、`source_env` 给采集范围，
   由 `engkit preflight` / `engkit run-selected` 注入；按进程号落盘，`engkit coverage` 合并判定）；
 - 未配置采集（环境变量缺省）或定位不到配置时静默不采（不影响正常跑测试）；
-- 同时把重命令守卫（`engkit.guard`）挂到 pytest 的 `addoption` / `configure` 两个钩子上，
+- 同时把重命令 / 全量测试守卫（`engkit.guard`）挂到 pytest 的 `configure` 钩子上，
   各仓无需再写自己的采集或拦截实现。
 """
 
@@ -75,15 +75,6 @@ def stop() -> None:
         _coverage.stop()
         _coverage.save()
         _coverage = None
-
-
-def pytest_addoption(parser: Any) -> None:
-    """注册守卫的 `--full` 选项（须在 collection 前完成注册）。
-
-    Args:
-        parser: pytest 的 Parser 对象。
-    """
-    guard.pytest_addoption(parser)
 
 
 def ensure_basetemp_parent(config: Any) -> None:

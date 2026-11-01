@@ -324,12 +324,15 @@ class GuardConfig:
     Attributes:
         scripts: 一律视为重命令的脚本名（如预检 / 基座校验入口）。
         repo_dirs: 仓库级目录名（扫描类命令参数指向这些即视为大范围）。
-        dir_test_threshold: 目录判重阈值（目录下测试文件数超过即算重命令）。
+        dir_test_threshold: 目录判重阈值（目录下测试文件数超过即算重命令 / 全量测试）。
+        full_test_dirs: 一律视为全量测试的目录前缀（如 `tests/e2e` / `tests/integration`；
+            命中即按全量处理，不受文件数阈值影响）。
     """
 
     scripts: tuple[str, ...] = ()
     repo_dirs: tuple[str, ...] = ()
     dir_test_threshold: int = 20
+    full_test_dirs: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -2097,11 +2100,12 @@ def parse(raw: dict[str, Any], path: Path) -> Config:
     )
 
     guard_table = _table(raw, "guard", "guard")
-    _check_keys(guard_table, ("scripts", "repo_dirs", "dir_test_threshold"), "guard")
+    _check_keys(guard_table, ("scripts", "repo_dirs", "dir_test_threshold", "full_test_dirs"), "guard")
     guard = GuardConfig(
         scripts=_strings(guard_table, "scripts", "guard"),
         repo_dirs=_strings(guard_table, "repo_dirs", "guard"),
         dir_test_threshold=int(_scalar(guard_table, "dir_test_threshold", "guard", int, 20)),
+        full_test_dirs=_strings(guard_table, "full_test_dirs", "guard"),
     )
 
     kiwi_table = _table(raw, "kiwi", "kiwi")

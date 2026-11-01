@@ -95,9 +95,11 @@ def test_frontend_changed_no_packages(cfg) -> None:
 def test_frontend_changed_runs_packages(cfg, monkeypatch: pytest.MonkeyPatch) -> None:
     """受影响包逐个执行（`{package}` 替换，含依赖反向闭包）。"""
     calls: list[list[str]] = []
+    selected: list[str] = []
 
-    def fake(argv: list[str], cwd: Path) -> int:
+    def fake(argv: list[str], cwd: Path, *, env=None) -> int:
         calls.append(argv)
+        selected.append((env or {}).get("ENGKIT_VITEST_SELECTED", ""))
         return 0
 
     monkeypatch.setattr(devloop, "_exec", fake)
@@ -106,11 +108,12 @@ def test_frontend_changed_runs_packages(cfg, monkeypatch: pytest.MonkeyPatch) ->
         ["pnpm", "--filter", "@mini/core", "test"],
         ["pnpm", "--filter", "@mini/desktop", "test"],
     ]
+    assert selected == ["@mini/core", "@mini/desktop"]
 
 
 def test_frontend_changed_failure_stops(cfg, monkeypatch: pytest.MonkeyPatch) -> None:
     """前端包失败即返回其退出码。"""
-    monkeypatch.setattr(devloop, "_exec", lambda argv, cwd: 5)
+    monkeypatch.setattr(devloop, "_exec", lambda argv, cwd, **kwargs: 5)
     assert devloop._frontend_changed(cfg, ["frontend/packages/core/src/x.ts"]) == 5
 
 

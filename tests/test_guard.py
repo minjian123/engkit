@@ -19,7 +19,7 @@ def _clean_env(monkeypatch):
     for name in (
         *guard.CI_ENVS,
         guard.ALLOW_ENV,
-        guard.FULL_ENV,
+        guard.FULL_AUTH_ENV,
         guard.HOOK_ENV,
         guard.HOOK_SKIP_ENV,
         guard._CONFIG_ENV,
@@ -44,13 +44,13 @@ def test_is_wrapped(monkeypatch) -> None:
 
 
 def test_allow_flags(monkeypatch) -> None:
-    """显式绕过 / 显式全量的真值判定。"""
+    """显式绕过 / 内部全量授权的真值判定。"""
     assert guard.allow_unwrapped() is False
     monkeypatch.setenv(guard.ALLOW_ENV, "yes")
     assert guard.allow_unwrapped() is True
-    assert guard.allow_full() is False
-    monkeypatch.setenv(guard.FULL_ENV, "true")
-    assert guard.allow_full() is True
+    assert guard.is_full_authorized() is False
+    monkeypatch.setenv(guard.FULL_AUTH_ENV, "true")
+    assert guard.is_full_authorized() is True
 
 
 def test_positional() -> None:
@@ -73,6 +73,8 @@ def test_classify(tmp_path: Path) -> None:
     assert guard.classify([], GUARD) == ""
     assert guard.classify(["python", "scripts/check-preflight.py"], GUARD) == "script"
     assert guard.classify(["pytest"], GUARD) == "pytest"
+    assert guard.classify(["pytest", "--help"], GUARD) == ""
+    assert guard.classify(["pytest", "--version"], GUARD) == ""
     assert guard.classify(["python", "-m", "pytest"], GUARD) == "pytest"
     assert guard.classify(["pytest", "tests/test_a.py"], GUARD) == ""
     assert guard.classify(["pytest", "tests/test_a.py::test_x"], GUARD) == ""
@@ -96,44 +98,70 @@ def test_should_block(monkeypatch) -> None:
     assert guard.should_block(["pytest"], GUARD) == ""
 
 
-def test_has_explicit_scope() -> None:
-    """范围声明判定。"""
-    assert guard.has_explicit_scope([]) is False
-    assert guard.has_explicit_scope(["-q"]) is False
-    assert guard.has_explicit_scope(["-k", "x"]) is True
-    assert guard.has_explicit_scope(["-k=x"]) is True
-    assert guard.has_explicit_scope(["tests/test_a.py"]) is True
+def test_pytest_args() -> None:
+    """pytest 调用参数提取（直接入口 / `python -m pytest` / 非 pytest）。"""
+    assert guard._pytest_args([]) is None
+    assert guard._pytest_args(["ruff", "check", "."]) is None
+    assert guard._pytest_args(["pytest", "tests/test_a.py"]) == ["tests/test_a.py"]
+    assert guard._pytest_args(["python", "-m", "pytest", "tests/test_a.py"]) == ["tests/test_a.py"]
 
 
-def test_full_test_should_block(monkeypatch) -> None:
-    """全量测试拦截判定。"""
+def test_full_target(tmp_path: Path) -> None:
+    """单个目标的全量判定（单文件 / 节点 / 目录阈值 / 全量目录前缀）。"""
+    config = GuardConfig(repo_dirs=("libs",), dir_test_threshold=1, full_test_dirs=("tests/integration", ""))
+    assert guard._full_target("tests/test_a.py", config) is False
+    assert guard._full_target("tests/test_a.py::test_x", config) is False
+    assert guard._full_target(".", config) is True
+    assert guard._full_target("libs", config) is True
+    assert guard._full_target("tests/integration", config) is True
+    assert guard._full_target("backend/tests/integration/test_a.py", config) is False
+    assert guard._full_target("backend/tests/integration", config) is True
+    assert guard._full_target("missing-dir", config) is False
+    narrow = tmp_path / "narrow"
+    narrow.mkdir()
+    (narrow / "test_a.py").write_text("", encoding="utf-8")
+    assert guard._full_target(str(narrow), config) is False
+    (narrow / "test_b.py").write_text("", encoding="utf-8")
+    assert guard._full_target(str(narrow), config) is True
+
+
+def test_full_test_should_block(monkeypatch, tmp_path: Path) -> None:
+    """全量测试拦截判定：无目标 / 宽目录 / `--pyargs` 拦；单文件 / 节点放行。"""
+    config = GuardConfig(repo_dirs=("libs", "services"), dir_test_threshold=20, full_test_dirs=("tests/e2e",))
     assert guard.full_test_should_block([]) is True
-    assert guard.full_test_should_block(["--full"]) is False
     assert guard.full_test_should_block(["tests/test_a.py"]) is False
+    assert guard.full_test_should_block([], config) is True
+    assert guard.full_test_should_block(["-q"], config) is True
+    assert guard.full_test_should_block(["-k", "x"], config) is True
+    assert guard.full_test_should_block(["--pyargs", "bms_core"], config) is True
+    assert guard.full_test_should_block(["libs"], config) is True
+    assert guard.full_test_should_block(["tests/e2e"], config) is True
+    assert guard.full_test_should_block(["tests/test_a.py"], config) is False
+    assert guard.full_test_should_block(["tests/test_a.py::test_x"], config) is False
+    assert guard.full_test_should_block(["--help"], config) is False
+    assert guard.full_test_should_block(["--version"], config) is False
+    narrow = tmp_path / "narrow"
+    narrow.mkdir()
+    (narrow / "test_a.py").write_text("", encoding="utf-8")
+    assert guard.full_test_should_block([str(narrow)], config) is False
     monkeypatch.setenv("CI", "1")
-    assert guard.full_test_should_block([]) is False
+    assert guard.full_test_should_block([], config) is False
+    monkeypatch.delenv("CI")
+    monkeypatch.setenv(guard.FULL_AUTH_ENV, "1")
+    assert guard.full_test_should_block([], config) is False
+    monkeypatch.delenv(guard.FULL_AUTH_ENV)
+    monkeypatch.setenv("ENGKIT_RUN_ONCE", "1")
+    assert guard.full_test_should_block([], config) is True
 
 
 def test_guidance_texts() -> None:
-    """提示文案包含包装命令与逃生开关。"""
+    """提示文案包含包装命令与定向指引。"""
     heavy = guard.heavy_guidance("pytest")
     assert "engkit run_once" in heavy
     assert guard.ALLOW_ENV in heavy
     full = guard.full_test_guidance()
-    assert "engkit run-selected" in full
-    assert guard.FULL_ENV in full
-
-
-def test_pytest_addoption() -> None:
-    """注册 `--full` 开关。"""
-    recorded: list[tuple] = []
-
-    class _Parser:
-        def addoption(self, *args, **kwargs):
-            recorded.append((args, kwargs))
-
-    guard.pytest_addoption(_Parser())
-    assert recorded and recorded[0][0][0] == "--full"
+    assert "engkit run-changed" in full
+    assert "CI" in full
 
 
 def _config(args: list[str]) -> types.SimpleNamespace:
@@ -149,8 +177,9 @@ def _config(args: list[str]) -> types.SimpleNamespace:
 
 
 def test_pytest_configure_heavy(monkeypatch, cfg) -> None:
-    """命中重命令即 `UsageError`。"""
+    """命中重命令即 `UsageError`（全量判定单独覆盖）。"""
     monkeypatch.setenv(guard._CONFIG_ENV, str(cfg.path))
+    monkeypatch.setattr(guard, "full_test_should_block", lambda *args, **kwargs: False)
     with pytest.raises(Exception, match="重命令守卫"):
         guard.pytest_configure(_config([]))
     assert guard.pytest_configure(_config(["tests/test_a.py"])) is None
@@ -251,6 +280,14 @@ def test_check_variants(monkeypatch, cfg, repo: Path, tmp_path: Path) -> None:
         guard.check(["pytest"])
     monkeypatch.setenv("CI", "1")
     assert guard.check(["pytest"]) is None
+
+
+def test_check_heavy(monkeypatch, cfg) -> None:
+    """`.pth` 命中重命令（非全量测试）即退出。"""
+    monkeypatch.setenv(guard._CONFIG_ENV, str(cfg.path))
+    monkeypatch.setattr(guard, "_checked", False)
+    with pytest.raises(SystemExit):
+        guard.check(["ruff"])
 
 
 def test_boot(monkeypatch, cfg) -> None:
