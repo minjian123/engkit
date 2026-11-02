@@ -24,13 +24,14 @@ _LINT_CHUNK = 50
 """ruff 单批文件数（避免命令行过长）。"""
 
 
-def _exec(argv: list[str], cwd: Path, *, env: dict[str, str] | None = None) -> int:
+def _exec(argv: list[str], cwd: Path, *, env: dict[str, str] | None = None, stdin_text: str = "") -> int:
     """执行子进程（输出直通终端）。
 
     Args:
         argv: 命令与参数（首项按 `PATH` + `PATHEXT` 解析，兼容 Windows 的 `.cmd`）。
         cwd: 工作目录。
         env: 子进程环境变量（缺省继承当前环境）。
+        stdin_text: 通过管道喂给子进程的标准输入（空串表示不接管 stdin）。
 
     Returns:
         int: 退出码（不可执行时返回 1）。
@@ -39,7 +40,14 @@ def _exec(argv: list[str], cwd: Path, *, env: dict[str, str] | None = None) -> i
     out(f"  $ {shown}")
     resolved = shutil.which(argv[0]) or argv[0]
     try:
-        return subprocess.run([resolved, *argv[1:]], cwd=cwd, check=False, env=env).returncode
+        return subprocess.run(
+            [resolved, *argv[1:]],
+            cwd=cwd,
+            check=False,
+            env=env,
+            input=stdin_text or None,
+            text=True,
+        ).returncode
     except OSError as exc:
         error(f"  执行失败：{exc}")
         return 1
@@ -117,67 +125,65 @@ def _frontend_changed(cfg: Config, changed: list[str]) -> int:
     return 0
 
 
-_CHANGED_LIST_NAME = "changed.txt"
-"""全量改动清单文件名（落 `.cache/devloop/`，供步骤占位 `{changed}` 引用）。"""
-
-_CHANGED_PY_LIST_NAME = "changed_py.txt"
-"""只含 `.py` 的清单文件名（供占位 `{changed_py}` 引用）。"""
+STDIN_LIST = "-"
+"""清单来源占位：渲染进 argv 后由本函数通过管道喂内容，不落任何临时文件。"""
 
 
-def _write_changed_lists(cfg: Config, changed: list[str], py_files: list[str]) -> tuple[Path, Path]:
-    """把改动清单落盘（`.cache/devloop/`，不进 git）。
+def _listing(changed: list[str]) -> str:
+    """把改动清单拼成管道要喂的文本。
 
     Args:
-        cfg: 仓配置。
-        changed: 全量改动清单。
-        py_files: 其中的 `.py` 文件。
+        changed: 改动文件（相对仓根）。
 
     Returns:
-        tuple[Path, Path]: (全量清单, `.py` 清单) 的绝对路径。
+        str: 一行一个路径，末尾带换行；空清单返回空串。
     """
-    base = cfg.root / ".cache" / "devloop"
-    base.mkdir(parents=True, exist_ok=True)
-    total = base / _CHANGED_LIST_NAME
-    py_list = base / _CHANGED_PY_LIST_NAME
-    total.write_text("".join(f"{rel}\n" for rel in changed), encoding="utf-8")
-    py_list.write_text("".join(f"{rel}\n" for rel in py_files), encoding="utf-8")
-    return total, py_list
+    if not changed:
+        return ""
+    return "".join(f"{rel}\n" for rel in changed)
 
 
 def _expand_step(
     cfg: Config,
     step: DevloopStep,
     *,
-    total_list: Path,
-    py_list: Path,
+    changed: list[str],
     py_files: list[str],
-) -> list[str]:
+) -> tuple[list[str], str]:
     """展开步骤命令模板的占位符。
+
+    `{changed}` / `{changed_py}` 渲染成 `-` 并由 `stdin_text` 携带清单内容（管道传输，
+    不落临时文件，也不受命令行长度上限约束）；`{changed_py*}` 仍是逐文件展开成路径参数
+    （pyright 这类工具只收路径，不收清单）。
 
     Args:
         cfg: 仓配置。
         step: 步骤。
-        total_list: 全量清单路径。
-        py_list: `.py` 清单路径。
-        py_files: `.py` 改动文件（相对仓根）。
+        changed: 全量改动清单。
+        py_files: 其中的 `.py` 文件（相对仓根）。
 
     Returns:
-        list[str]: 可直接执行的 argv。
+        tuple[list[str], str]: (可直接执行的 argv, 从标准输入喂给子进程的清单文本)。
+
+    Raises:
+        ValueError: 同一步骤同时引用全量清单与 `.py` 清单（管道只能承载一份）。
     """
     argv: list[str] = []
+    stdin_text = ""
+    used: str = ""
     for token in step.cmd:
         if token == "{changed_py*}":
             argv.extend(str(cfg.root / rel) for rel in py_files)
             continue
-        argv.append(
-            {
-                "{python}": sys.executable,
-                "{root}": str(cfg.root),
-                "{changed}": str(total_list),
-                "{changed_py}": str(py_list),
-            }.get(token, token)
-        )
-    return argv
+        if token in ("{changed}", "{changed_py}"):
+            if used and used != token:
+                raise ValueError(f"步骤「{step.label}」同时引用 {used} 与 {token}：标准输入只能承载一份清单")
+            used = token
+            stdin_text = _listing(changed if token == "{changed}" else py_files)
+            argv.append(STDIN_LIST)
+            continue
+        argv.append({"{python}": sys.executable, "{root}": str(cfg.root)}.get(token, token))
+    return argv, stdin_text
 
 
 def _run_steps(cfg: Config, changed: list[str]) -> int:
@@ -198,14 +204,18 @@ def _run_steps(cfg: Config, changed: list[str]) -> int:
     if not cfg.devloop_steps:
         return 0
     py_files = [rel for rel in changed if rel.endswith(".py") and (cfg.root / rel).is_file()]
-    total_list, py_list = _write_changed_lists(cfg, changed, py_files)
     for step in cfg.devloop_steps:
         uses_py = any("{changed_py" in token for token in step.cmd)
         if (step.only_if == "changed_py" or uses_py) and not py_files:
             out(f"[devloop] 跳过：{step.label}（无改动 .py）")
             continue
         out(f"[devloop] 附加步骤：{step.label}")
-        code = _exec(_expand_step(cfg, step, total_list=total_list, py_list=py_list, py_files=py_files), cfg.root)
+        try:
+            argv, stdin_text = _expand_step(cfg, step, changed=changed, py_files=py_files)
+        except ValueError as exc:
+            error(f"[devloop] 步骤模板不合法：{exc}")
+            return 2
+        code = _exec(argv, cfg.root, stdin_text=stdin_text)
         if code != 0:
             out(f"[devloop] 附加步骤未过 ⇒ {step.label}，测试未执行")
             return code

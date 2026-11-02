@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import io
+import sys
 import tomllib
 from pathlib import Path
 
@@ -43,7 +45,9 @@ def test_whitelist_and_semantic_names(tmp_path: Path) -> None:
     assert snowflake_ids.scan_text("src/models/other.py", semantic, rule)
 
 
-def test_run_full_incremental_and_missing_files(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+def test_run_full_incremental_and_missing_files(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
     """全量扫描、增量清单过滤（含 Windows 路径与非目标文件）、剪枝与缺文件跳过。"""
     write(
         tmp_path,
@@ -64,6 +68,10 @@ def test_run_full_incremental_and_missing_files(tmp_path: Path, capsys: pytest.C
 
     changed.write_text("src/models/missing.py\n", encoding="utf-8")
     assert snowflake_ids.run(cfg, files_from=str(changed)) == 0
+
+    # 清单来源 `-`：门禁通过管道递清单，反斜杠归一后与文件来源等价
+    monkeypatch.setattr(sys, "stdin", io.StringIO(r"src\models\clean.py" + "\nother/x.py\n"))
+    assert snowflake_ids.run(cfg, files_from="-") == 0
 
 
 def test_run_clean_and_self_test(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:

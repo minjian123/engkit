@@ -12,11 +12,13 @@
 from __future__ import annotations
 
 import re
+import sys
 from pathlib import Path
 
 from ..config import Config, SnowflakeIdsRules
 from ..console import out
 from .rules import RulesError, read_text, require
+from .scan_scope import STDIN_LIST
 
 MIN_KEYS = ("scan_targets", "id_names", "id_suffixes", "whitelist")
 """未登记时报错给出的最小键指引。"""
@@ -94,11 +96,8 @@ def _iter_files(root: Path, rule: SnowflakeIdsRules, files_from: str) -> list[st
         list[str]: 相对路径清单。
     """
     if files_from:
-        candidates = [
-            line.strip().replace("\\", "/")
-            for line in read_text(Path(files_from)).splitlines()
-            if line.strip().endswith(".py")
-        ]
+        source = sys.stdin.read() if files_from == STDIN_LIST else read_text(Path(files_from))
+        candidates = [line.strip().replace("\\", "/") for line in source.splitlines() if line.strip().endswith(".py")]
         return [
             path
             for path in candidates

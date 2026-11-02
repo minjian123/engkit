@@ -138,14 +138,14 @@ def test_run_steps_skip_when_py_placeholder_unused(repo: Path, cfg: Config) -> N
 
 
 def test_run_steps_placeholders(repo: Path, cfg: Config) -> None:
-    """占位展开：`{changed}` 指向清单文件（内容为改动路径）、`{changed_py*}` 展开为多文件、`{root}` 生效。"""
+    """占位展开：`{changed}` 渲染成 `-` 并由管道承载清单、`{changed_py*}` 展开为多文件、`{root}` 生效。"""
     (repo / "a.py").write_text("X = 1\n", encoding="utf-8")
     (repo / "b.py").write_text("Y = 2\n", encoding="utf-8")
     code = (
         "import sys, pathlib;"
         "names = sorted(p.replace(chr(92), '/').split('/')[-1] for p in sys.argv[3:]);"
-        "pathlib.Path('dump.txt').write_text(pathlib.Path(sys.argv[1]).read_text() + '|' + ','.join(names) + '|' + "
-        "sys.argv[2])"
+        "pathlib.Path('dump.txt').write_text("
+        "sys.argv[1] + '<<' + sys.stdin.read() + '|' + ','.join(names) + '|' + sys.argv[2])"
     )
     config = _cfg_with(
         repo,
@@ -154,34 +154,52 @@ def test_run_steps_placeholders(repo: Path, cfg: Config) -> None:
     )
     assert devloop._run_steps(config, ["a.py", "b.py", "docs/x.md"]) == 0
     dumped = (repo / "dump.txt").read_text(encoding="utf-8")
-    head, _, tail = dumped.partition("|")
+    marker, _, rest = dumped.partition("<<")
+    assert marker == devloop.STDIN_LIST
+    assert not (repo / ".cache" / "devloop").exists()
+    head, _, tail = rest.partition("|")
     assert head.splitlines() == ["a.py", "b.py", "docs/x.md"]
     assert tail.endswith("|" + str(repo))
 
 
-def test_write_changed_lists_layout(repo: Path, cfg: Config) -> None:
-    """清单落盘：`.cache/devloop/` 下两份（全量 / 仅 py），内容一行一个相对路径。"""
-    (repo / "a.py").write_text("X = 1\n", encoding="utf-8")
-    total, py_list = devloop._write_changed_lists(cfg, ["a.py", "docs/x.md"], ["a.py"])
-    assert total.parent == repo / ".cache" / "devloop"
-    assert total.read_text(encoding="utf-8").splitlines() == ["a.py", "docs/x.md"]
-    assert py_list.read_text(encoding="utf-8").splitlines() == ["a.py"]
+def test_listing_text() -> None:
+    """清单文本：一行一个相对路径、末尾带换行；空清单为空串。"""
+    assert devloop._listing(["a.py", "docs/x.md"]) == "a.py\ndocs/x.md\n"
+    assert devloop._listing([]) == ""
 
 
 def test_expand_step_python_and_root(repo: Path, cfg: Config) -> None:
-    """`{python}` 取当前解释器、`{root}` 取仓根。"""
-    total, py_list = devloop._write_changed_lists(cfg, ["a.py"], ["a.py"])
-    argv = devloop._expand_step(
+    """`{python}` 取当前解释器、`{root}` 取仓根、清单占位渲染成 `-` 并带出内容。"""
+    argv, stdin_text = devloop._expand_step(
         cfg,
-        DevloopStep(label="x", cmd=("{python}", "{root}", "{changed}", "{changed_py}")),
-        total_list=total,
-        py_list=py_list,
+        DevloopStep(label="x", cmd=("{python}", "{root}", "{changed}")),
+        changed=["a.py"],
         py_files=["a.py"],
     )
     assert argv[0] == sys.executable
     assert argv[1] == str(repo)
-    assert argv[2] == str(total)
-    assert argv[3] == str(py_list)
+    assert argv[2] == devloop.STDIN_LIST
+    assert stdin_text == "a.py\n"
+
+
+def test_expand_step_py_list_and_conflict(repo: Path, cfg: Config) -> None:
+    """`{changed_py}` 只带 `.py`；同一步骤混用两份清单直接拒绝（管道只能承载一份）。"""
+    argv, stdin_text = devloop._expand_step(
+        cfg,
+        DevloopStep(label="x", cmd=("--files-from", "{changed_py}")),
+        changed=["a.py", "docs/x.md"],
+        py_files=["a.py"],
+    )
+    assert argv == ["--files-from", devloop.STDIN_LIST]
+    assert stdin_text == "a.py\n"
+
+    with pytest.raises(ValueError, match="标准输入只能承载一份清单"):
+        devloop._expand_step(
+            cfg,
+            DevloopStep(label="y", cmd=("{changed}", "{changed_py}")),
+            changed=["a.py"],
+            py_files=["a.py"],
+        )
 
 
 def test_run_changed_steps_failure_skips_tests(cfg, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -203,3 +221,11 @@ def test_run_changed_steps_disabled(cfg, monkeypatch: pytest.MonkeyPatch) -> Non
     monkeypatch.setattr(devloop, "_frontend_changed", lambda cfg, changed: 0)
     assert devloop.run_changed(cfg, changed_files=("a.py",), steps=False) == 0
     assert ran == []
+
+
+def test_run_steps_rejects_two_lists(repo: Path, cfg: Config, capsys: pytest.CaptureFixture[str]) -> None:
+    """同一步骤混用两份清单：拒绝执行并返回 2，不进入下一个步骤。"""
+    (repo / "a.py").write_text("X = 1" + chr(10), encoding="utf-8")
+    config = _cfg_with(repo, cfg, DevloopStep(label="混用", cmd=("{changed}", "{changed_py}")))
+    assert devloop._run_steps(config, ["a.py"]) == 2
+    assert "标准输入只能承载一份清单" in capsys.readouterr().err

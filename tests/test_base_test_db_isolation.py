@@ -8,6 +8,8 @@
 from __future__ import annotations
 
 import ast
+import io
+import sys
 import tomllib
 from dataclasses import replace
 from pathlib import Path
@@ -153,7 +155,9 @@ def test_cleanup(meta, table, cache):
 '''
 
 
-def test_module_pytestmark_and_base_modules(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+def test_module_pytestmark_and_base_modules(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
     """模块级 `pytestmark` 放行；共享基座模块（`base_modules`）不参与判定。"""
     module_mark = (
         "import pytest\n\n"
@@ -198,6 +202,9 @@ def test_module_pytestmark_and_base_modules(tmp_path: Path, capsys: pytest.Captu
     changed = tmp_path / "changed.txt"
     changed.write_text("src/tests/test_base.py\nsrc/tests/test_other.py\n", encoding="utf-8")
     assert test_db_isolation._iter_files(tmp_path, scoped, str(changed)) == ["src/tests/test_other.py"]
+    # 清单来源 `-`：门禁通过管道递清单，不落临时文件
+    monkeypatch.setattr(sys, "stdin", io.StringIO("src/tests/test_base.py\nsrc/tests/test_other.py\n"))
+    assert test_db_isolation._iter_files(tmp_path, scoped, "-") == ["src/tests/test_other.py"]
     capsys.readouterr()
 
 

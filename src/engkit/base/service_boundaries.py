@@ -43,7 +43,7 @@ from ..config import Config, ServiceBoundariesRules, parse
 from ..console import out
 from . import table_index
 from .rules import RulesError, read_text, require
-from .scan_scope import read_file_list
+from .scan_scope import STDIN_LIST, read_file_list
 from .table_index import TableIndex
 
 MIN_KEYS = (
@@ -2893,9 +2893,12 @@ def read_changed(cfg: Config, files_from: str) -> list[str] | None:
     """
     if not files_from:
         return None
-    path = Path(files_from)
-    if not path.is_absolute():
-        path = cfg.root / files_from
+    if files_from == STDIN_LIST:
+        path = Path(STDIN_LIST)
+    else:
+        path = Path(files_from)
+        if not path.is_absolute():
+            path = cfg.root / files_from
     return read_file_list(path)
 
 

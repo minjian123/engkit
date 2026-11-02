@@ -8,27 +8,35 @@
 
 - 清单为**一行一个相对仓根路径**（`/` 分隔）；空行与 `#` 注释忽略；
 - 只接受存在的文件，扩展名与排除目录判定仍由各护栏自己的规则负责（此处不做二次判断）；
-- 清单里的重复项按首次出现去重，保持清单顺序（便于复现与逐项定位）。
+- 清单里的重复项按首次出现去重，保持清单顺序（便于复现与逐项定位）；
+- 清单来源可以是文件，也可以是标准输入（路径写 `-`）：门禁把改动清单直接管道喂给
+  各护栏，**不落任何临时文件**，同时避免超长命令行。
 """
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 from ..console import error
 
-__all__ = ["read_file_list", "select_files"]
+__all__ = ["STDIN_LIST", "read_file_list", "select_files"]
+
+STDIN_LIST = "-"
+"""清单来自标准输入的占位路径。"""
 
 
 def read_file_list(path: Path) -> list[str] | None:
     """读取改动文件清单。
 
     Args:
-        path: 清单文件路径。
+        path: 清单文件路径；`-` 表示从标准输入读取。
 
     Returns:
         list[str] | None: 相对仓根的路径清单（去空行 / 注释 / 重复）；读不到返回 None。
     """
+    if str(path) == STDIN_LIST:
+        return normalize_lines(sys.stdin.read().splitlines())
     try:
         text = path.read_text(encoding="utf-8")
     except OSError as exc:

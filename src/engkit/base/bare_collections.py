@@ -19,7 +19,7 @@ from typing import NamedTuple
 from ..config import BareCollectionsRules, Config, parse
 from ..console import out
 from .rules import RulesError, require
-from .scan_scope import read_file_list, select_files
+from .scan_scope import STDIN_LIST, read_file_list, select_files
 
 MIN_KEYS = ("scan_targets", "whitelist", "baseline")
 """未登记时报错给出的最小键指引。"""
@@ -833,9 +833,12 @@ def _read_changed(cfg: Config, files_from: str) -> list[str] | None:
     """
     if not files_from:
         return None
-    path = Path(files_from)
-    if not path.is_absolute():
-        path = cfg.root / files_from
+    if files_from == STDIN_LIST:
+        path = Path(STDIN_LIST)
+    else:
+        path = Path(files_from)
+        if not path.is_absolute():
+            path = cfg.root / files_from
     listed = read_file_list(path)
     if listed is None:
         raise SystemExit(2)

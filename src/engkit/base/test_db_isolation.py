@@ -14,11 +14,13 @@
 from __future__ import annotations
 
 import ast
+import sys
 from pathlib import Path
 
 from ..config import Config, TestDbIsolationRules
 from ..console import out
 from .rules import RulesError, read_text, require
+from .scan_scope import STDIN_LIST
 
 MIN_KEYS = ("scan_targets",)
 """未登记时报错给出的最小键指引。"""
@@ -375,11 +377,8 @@ def _iter_files(root: Path, rule: TestDbIsolationRules, files_from: str) -> list
         list[str]: 相对路径清单。
     """
     if files_from:
-        candidates = [
-            line.strip().replace("\\", "/")
-            for line in read_text(Path(files_from)).splitlines()
-            if line.strip().endswith(".py")
-        ]
+        source = sys.stdin.read() if files_from == STDIN_LIST else read_text(Path(files_from))
+        candidates = [line.strip().replace("\\", "/") for line in source.splitlines() if line.strip().endswith(".py")]
         # 只判**用例文件**（`test_*.py`）：与全量模式同一命名判据，两种模式结论必须一致
         # （`tests_support/` 下的共享测试基座本来就不在用例文件之列，其建库职责由
         # `base_modules` 显式声明，不靠文件名隐藏）。

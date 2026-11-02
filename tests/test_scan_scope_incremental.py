@@ -10,7 +10,9 @@
 
 from __future__ import annotations
 
+import io
 import json
+import sys
 from pathlib import Path
 
 import pytest
@@ -19,6 +21,7 @@ from base_fixtures import config, write
 from engkit.base import bare_collections as bc
 from engkit.base import product_literals as pl
 from engkit.base import scan_scope
+from engkit.base import service_boundaries as sb
 from engkit.config import parse
 
 _BARE = "def f(x: list[int]) -> None:\n    del x\n"
@@ -331,3 +334,30 @@ def test_product_literals_run_incremental_relative_listing(tmp_path: Path, capsy
         == 0
     )
     assert "增量模式" in capsys.readouterr().out
+
+
+# ---------------- 清单来源：标准输入（门禁不落临时文件） ----------------
+
+
+def test_read_file_list_from_stdin(monkeypatch: pytest.MonkeyPatch) -> None:
+    """清单来源为 `-`：从标准输入读取，规范化口径与文件来源一致。"""
+    monkeypatch.setattr(sys, "stdin", io.StringIO("src/a.py\n# 注释\n\nsrc\\b.py\nsrc/a.py\n"))
+    assert scan_scope.read_file_list(Path(scan_scope.STDIN_LIST)) == ["src/a.py", "src/b.py"]
+
+
+def test_bare_read_changed_from_stdin(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """裸集合：`files_from` 为 `-` 时取标准输入，不得拼成 `<仓根>/-`。"""
+    monkeypatch.setattr(sys, "stdin", io.StringIO("src/a.py\n"))
+    assert bc._read_changed(_bare_cfg(tmp_path), "-") == ["src/a.py"]
+
+
+def test_product_literals_read_changed_from_stdin(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """产品字面量：`-` 走标准输入，与文件来源同一套规范化。"""
+    monkeypatch.setattr(sys, "stdin", io.StringIO("svc/a.py\n"))
+    assert pl._read_changed(_pl_cfg(tmp_path), "-") == ["svc/a.py"]
+
+
+def test_service_boundaries_read_changed_from_stdin(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """服务边界：`-` 走标准输入。"""
+    monkeypatch.setattr(sys, "stdin", io.StringIO("backend/svc/a.py\n"))
+    assert sb.read_changed(_bare_cfg(tmp_path), "-") == ["backend/svc/a.py"]
