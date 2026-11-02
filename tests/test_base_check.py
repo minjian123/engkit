@@ -282,6 +282,17 @@ def test_env_example_run_paths(tmp_path: Path) -> None:
     template.write_text("OTHER=1\n", encoding="utf-8")
     assert env_example.run(cfg, as_self_test=False) == 1
 
+    # 增量：清单未含模板则不判；含则照常判；清单不可读退 2
+    template.write_text("SECRET=...\n", encoding="utf-8")
+    changed = tmp_path / "changed.txt"
+    changed.write_text("backend/README.md\n", encoding="utf-8")
+    assert env_example.run(cfg, as_self_test=False, files_from=str(changed)) == 0
+    changed.write_text("backend/.env.example\n", encoding="utf-8")
+    assert env_example.run(cfg, as_self_test=False, files_from=str(changed)) == 0
+    template.write_text("OTHER=1\n", encoding="utf-8")
+    assert env_example.run(cfg, as_self_test=False, files_from=str(changed)) == 1
+    assert env_example.run(cfg, as_self_test=False, files_from=str(tmp_path / "missing.txt")) == 2
+
 
 def test_system_fields_run_paths(tmp_path: Path) -> None:
     """系统字段：未登记 / 自检 / 清单缺失 / 通过。"""

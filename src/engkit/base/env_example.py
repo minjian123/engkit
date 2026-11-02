@@ -6,9 +6,12 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from ..config import Config, EnvExampleRules, EnvTemplateRule
 from ..console import out
 from .rules import RulesError, read_text, require
+from .scan_scope import read_file_list, select_files
 
 MIN_KEYS = ("templates",)
 """未登记时报错给出的最小键指引。"""
@@ -34,7 +37,10 @@ def check_texts(rule: EnvExampleRules, texts: dict[str, str]) -> tuple[str, ...]
             if key in text:
                 problems.append(f"{label} 残留已移除键 {key}")
     for template in rule.templates:
-        text = texts.get(template.path, "")
+        text = texts.get(template.path)
+        if text is None:
+            # 增量模式下未被改动的模板不进 texts（缺文件由 `load_texts` 单独拦）
+            continue
         for key in template.required_keys:
             if key not in text:
                 problems.append(f"{template.path} 缺键位 {key}")
@@ -137,15 +143,16 @@ def _add_private(texts: dict[str, str], label: str, marker: str) -> dict[str, st
     return {**texts, label: texts[label] + f"\n-----BEGIN {marker}-----"}
 
 
-def run(cfg: Config, *, as_self_test: bool) -> int:
+def run(cfg: Config, *, as_self_test: bool, files_from: str = "") -> int:
     """执行环境模板校验。
 
     Args:
         cfg: 仓配置。
         as_self_test: 是否只跑内置自检。
+        files_from: 改动文件清单（增量只判清单内的模板；空串全量）。
 
     Returns:
-        int: 退出码（0 通过 / 1 有问题 / 2 规则或模板缺失）。
+        int: 退出码（0 通过 / 1 有问题 / 2 规则或模板缺失 / 清单不可读）。
     """
     try:
         rule = require(cfg.env_example_rules, "env_example", MIN_KEYS)
@@ -159,11 +166,18 @@ def run(cfg: Config, *, as_self_test: bool) -> int:
     except RulesError as exc:
         out(f"[check_env_example] {exc}")
         return 2
+    if files_from:
+        listed = read_file_list(Path(files_from))
+        if listed is None:
+            return 2
+        changed = {item.resolve().relative_to(cfg.root.resolve()).as_posix() for item in select_files(cfg.root, listed)}
+        texts = {path: text for path, text in texts.items() if path in changed}
+        out(f"[check_env_example] 增量模式：只判清单内 {len(texts)} 份模板")
     problems = check_texts(rule, texts)
     if problems:
         out(f"[check_env_example] 不通过：{len(problems)} 项")
         for item in problems:
             out(f"  - {item}")
         return 1
-    out(f"[check_env_example] 通过：{len(rule.templates)} 份模板键位齐备、无废弃键与真实密钥")
+    out(f"[check_env_example] 通过：{len(texts)} 份模板键位齐备、无废弃键与真实密钥")
     return 0

@@ -175,6 +175,7 @@ def _build_parser() -> argparse.ArgumentParser:
             "base",
             "backend-base",
             "system-fields",
+            "env-example",
             "bare-collections",
             "snowflake-ids",
             "test-db-isolation",
@@ -742,7 +743,7 @@ def _cmd_base(args: argparse.Namespace) -> int:
     if name == "env-example":
         from .base import env_example
 
-        return env_example.run(cfg, as_self_test=bool(args.self_test))
+        return env_example.run(cfg, as_self_test=bool(args.self_test), files_from=str(args.files_from))
     if name == "product-literals":
         from .base import product_literals
 
