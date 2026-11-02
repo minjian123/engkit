@@ -19,6 +19,7 @@ from pathlib import Path
 from ..config import BackendBaseRules, Config, parse
 from ..console import out
 from .rules import RulesError, read_text, require
+from .scan_scope import read_file_list, select_files
 
 MIN_KEYS = ("manifest", "chain_doc", "source_dirs", "error_codes", "versions_dir")
 """未登记时报错给出的最小键指引。"""
@@ -134,12 +135,13 @@ def normalize_parent(raw: str) -> str:
     return re.sub(r"\[.*\]", "", raw, flags=re.S).strip().split(".")[-1].strip()
 
 
-def iter_source_files(cfg: Config, rule: BackendBaseRules) -> list[Path]:
+def iter_source_files(cfg: Config, rule: BackendBaseRules, scope: set[str] | None = None) -> list[Path]:
     """枚举源码面上的 Python 文件（跳过缓存目录与测试目录）。
 
     Args:
         cfg: 仓配置。
         rule: 规则段。
+        scope: 作用域（仓内相对路径集合；None 表示全量）。
 
     Returns:
         list[Path]: 文件清单（按扫描面与目录序遍历）。
@@ -153,22 +155,25 @@ def iter_source_files(cfg: Config, rule: BackendBaseRules) -> list[Path]:
             parts = path.relative_to(base).parts
             if any(part in SKIP_DIR_NAMES for part in parts[:-1]):
                 continue
+            if scope is not None and path.relative_to(cfg.root).as_posix() not in scope:
+                continue
             files.append(path)
     return files
 
 
-def index_classes(cfg: Config, rule: BackendBaseRules) -> dict[str, list[list[str]]]:
+def index_classes(cfg: Config, rule: BackendBaseRules, scope: set[str] | None = None) -> dict[str, list[list[str]]]:
     """类名 → 父类名列表（重复定义保留全部）。
 
     Args:
         cfg: 仓配置。
         rule: 规则段。
+        scope: 作用域（仓内相对路径集合；None 表示全量）。
 
     Returns:
         dict[str, list[list[str]]]: 继承索引。
     """
     index: dict[str, list[list[str]]] = {}
-    for path in iter_source_files(cfg, rule):
+    for path in iter_source_files(cfg, rule, scope):
         text = read_text(path)
         for cls, bases in CLASS_RE.findall(text):
             parents = [normalize_parent(base) for base in split_bases(bases)]
@@ -176,7 +181,31 @@ def index_classes(cfg: Config, rule: BackendBaseRules) -> dict[str, list[list[st
     return index
 
 
-def check_inheritance(cfg: Config, rule: BackendBaseRules, index: dict[str, list[list[str]]], outcome: Outcome) -> int:
+def scoped_classes(cfg: Config, rule: BackendBaseRules, scope: set[str]) -> set[str]:
+    """取作用域内定义的类名集合（判据实体的收敛面）。
+
+    Args:
+        cfg: 仓配置。
+        rule: 规则段。
+        scope: 作用域（仓内相对路径集合）。
+
+    Returns:
+        set[str]: 类名集合。
+    """
+    names: set[str] = set()
+    for path in iter_source_files(cfg, rule, scope):
+        for cls, _ in CLASS_RE.findall(read_text(path)):
+            names.add(cls)
+    return names
+
+
+def check_inheritance(
+    cfg: Config,
+    rule: BackendBaseRules,
+    index: dict[str, list[list[str]]],
+    outcome: Outcome,
+    scoped: set[str] | None = None,
+) -> int:
     """① 继承链对账（实现契约 §7 ↔ 代码）。
 
     Args:
@@ -184,6 +213,7 @@ def check_inheritance(cfg: Config, rule: BackendBaseRules, index: dict[str, list
         rule: 规则段。
         index: 继承索引。
         outcome: 结果累积器。
+        scoped: 作用域内类名（None 表示全量；增量只判这些类作为子类的相邻关系）。
 
     Returns:
         int: 核对过的相邻关系数。
@@ -195,6 +225,8 @@ def check_inheritance(cfg: Config, rule: BackendBaseRules, index: dict[str, list
     for raw_line in section.splitlines():
         for chain in parse_chains(raw_line):
             for parent, child in itertools.pairwise(chain):
+                if scoped is not None and child not in scoped:
+                    continue
                 checked += 1
                 definitions = index.get(parent)
                 if not definitions:
@@ -211,7 +243,11 @@ def check_inheritance(cfg: Config, rule: BackendBaseRules, index: dict[str, list
 
 
 def check_manifest_coverage(
-    cfg: Config, rule: BackendBaseRules, index: dict[str, list[list[str]]], outcome: Outcome
+    cfg: Config,
+    rule: BackendBaseRules,
+    index: dict[str, list[list[str]]],
+    outcome: Outcome,
+    scoped: set[str] | None = None,
 ) -> int:
     """② 清单对账：直接继承基座根的类必须出现在基类清单文本中。
 
@@ -220,6 +256,7 @@ def check_manifest_coverage(
         rule: 规则段。
         index: 继承索引。
         outcome: 结果累积器。
+        scoped: 作用域内类名（None 表示全量）。
 
     Returns:
         int: 受检类数。
@@ -228,7 +265,9 @@ def check_manifest_coverage(
     classes = sorted(
         name
         for name, definitions in index.items()
-        if not name.startswith("_") and any("BaseObject" in parents for parents in definitions)
+        if not name.startswith("_")
+        and any("BaseObject" in parents for parents in definitions)
+        and (scoped is None or name in scoped)
     )
     for name in classes:
         if not re.search(rf"\b{name}\b", manifest_text):
@@ -300,18 +339,21 @@ def load_direct_baseline(cfg: Config, rule: BackendBaseRules, outcome: Outcome) 
     return tuple(sorted(baseline))
 
 
-def scan_direct_base_object(cfg: Config, rule: BackendBaseRules) -> list[tuple[str, str]]:
+def scan_direct_base_object(
+    cfg: Config, rule: BackendBaseRules, scope: set[str] | None = None
+) -> list[tuple[str, str]]:
     """扫描直接继承基座根的类（返回（相对文件, 类名））。
 
     Args:
         cfg: 仓配置。
         rule: 规则段。
+        scope: 作用域（仓内相对路径集合；None 表示全量）。
 
     Returns:
         list[tuple[str, str]]: 命中清单（去重、稳定序）。
     """
     found: list[tuple[str, str]] = []
-    for path in iter_source_files(cfg, rule):
+    for path in iter_source_files(cfg, rule, scope):
         for cls, bases in CLASS_RE.findall(read_text(path)):
             parents = [normalize_parent(base) for base in split_bases(bases)]
             if "BaseObject" in parents:
@@ -321,13 +363,16 @@ def scan_direct_base_object(cfg: Config, rule: BackendBaseRules) -> list[tuple[s
     return found
 
 
-def check_direct_inheritance(cfg: Config, rule: BackendBaseRules, outcome: Outcome) -> int:
+def check_direct_inheritance(
+    cfg: Config, rule: BackendBaseRules, outcome: Outcome, scope: set[str] | None = None
+) -> int:
     """③ 直继承合法性（体系根 / 基线放行，其余拦截）。
 
     Args:
         cfg: 仓配置。
         rule: 规则段。
         outcome: 结果累积器。
+        scope: 作用域（None 表示全量）。
 
     Returns:
         int: 受检类数。
@@ -337,7 +382,7 @@ def check_direct_inheritance(cfg: Config, rule: BackendBaseRules, outcome: Outco
         outcome.problems.append(f"[直继承] 实现契约未登记「{rule.root_bases_marker}」小节（白名单缺失，按拒绝处理）")
         return 0
     baseline = load_direct_baseline(cfg, rule, outcome)
-    found = scan_direct_base_object(cfg, rule)
+    found = scan_direct_base_object(cfg, rule, scope)
     for rel, cls in found:
         if cls in roots or (rel, cls) in baseline:
             continue
@@ -371,18 +416,21 @@ def dataclass_shape(node: ast.ClassDef) -> tuple[bool, bool]:
     return False, False
 
 
-def scan_class_shapes(cfg: Config, rule: BackendBaseRules) -> dict[str, list[tuple[bool, bool]]]:
+def scan_class_shapes(
+    cfg: Config, rule: BackendBaseRules, scope: set[str] | None = None
+) -> dict[str, list[tuple[bool, bool]]]:
     """扫描源目录，返回 类名 → [（是否 dataclass, 是否 frozen）]。
 
     Args:
         cfg: 仓配置。
         rule: 规则段。
+        scope: 作用域（仓内相对路径集合；None 表示全量）。
 
     Returns:
         dict[str, list[tuple[bool, bool]]]: 类形态索引。
     """
     shapes: dict[str, list[tuple[bool, bool]]] = {}
-    for path in iter_source_files(cfg, rule):
+    for path in iter_source_files(cfg, rule, scope):
         try:
             tree = ast.parse(read_text(path))
         except (OSError, SyntaxError):
@@ -420,20 +468,25 @@ def descendants(index: dict[str, list[list[str]]], root: str) -> set[str]:
 
 
 def check_data_class_semantics(
-    cfg: Config, rule: BackendBaseRules, index: dict[str, list[list[str]]], outcome: Outcome
+    cfg: Config,
+    rule: BackendBaseRules,
+    index: dict[str, list[list[str]]],
+    outcome: Outcome,
+    scope: set[str] | None = None,
 ) -> int:
     """④ 数据类体系语义（值对象须 frozen dataclass、框架对象不得 dataclass）。
 
     Args:
         cfg: 仓配置。
         rule: 规则段。
-        index: 继承索引。
+        index: 继承索引（全量，用于血缘推导）。
         outcome: 结果累积器。
+        scope: 作用域（None 表示全量；增量只判作用域内定义的类）。
 
     Returns:
         int: 受检的类形态条目数。
     """
-    shapes = scan_class_shapes(cfg, rule)
+    shapes = scan_class_shapes(cfg, rule, scope)
     value_tree = descendants(index, rule.value_object_root)
     framework_tree = descendants(index, rule.framework_object_root)
     checked = 0
@@ -455,17 +508,20 @@ def check_data_class_semantics(
     return checked
 
 
-def check_error_segments(cfg: Config, rule: BackendBaseRules, outcome: Outcome) -> int:
+def check_error_segments(cfg: Config, rule: BackendBaseRules, outcome: Outcome, scope: set[str] | None = None) -> int:
     """⑤ 错误码段位（5 位平台码且万位 1~9）。
 
     Args:
         cfg: 仓配置。
         rule: 规则段。
         outcome: 结果累积器。
+        scope: 作用域（None 表示全量；增量下错误码模块未改动即跳过）。
 
     Returns:
         int: 受检错误码数。
     """
+    if scope is not None and rule.error_codes not in scope:
+        return 0
     text = read_text(cfg.root / rule.error_codes)
     start = text.find("class ErrorCode")
     body = text[start:] if start >= 0 else text
@@ -570,16 +626,17 @@ def iter_chain_dirs(cfg: Config, rule: BackendBaseRules, outcome: Outcome) -> li
     return found
 
 
-def check_alembic_chain(cfg: Config, rule: BackendBaseRules, outcome: Outcome) -> int:
+def check_alembic_chain(cfg: Config, rule: BackendBaseRules, outcome: Outcome, scope: set[str] | None = None) -> int:
     """⑥ 迁移链分链校验（单 head / 不断链 / 分支标签与配置段一致）。
 
     Args:
         cfg: 仓配置。
         rule: 规则段。
         outcome: 结果累积器。
+        scope: 作用域（None 表示全量；增量只判作用域内的 revision 文件，head 数与配置段位不判）。
 
     Returns:
-        int: revision 总数。
+        int: 判定的 revision 数。
     """
     base = cfg.root / rule.versions_dir
     if not base.is_dir():
@@ -592,26 +649,34 @@ def check_alembic_chain(cfg: Config, rule: BackendBaseRules, outcome: Outcome) -
         chain = f"{domain}:{datasource}"
         revisions: dict[str, str | None] = {}
         labels: dict[str, tuple[str, ...]] = {}
+        sources: dict[str, str] = {}
         for item in sorted(path.iterdir()):
             if item.suffix != ".py":
                 continue
+            rel = item.relative_to(cfg.root).as_posix()
+            judged_file = scope is None or rel in scope
             rev, parent, branch_labels = revision_fields(read_text(item))
             if not rev:
-                outcome.problems.append(f"[迁移链] {chain}/{item.name} 缺少 revision 定义")
+                if judged_file:
+                    outcome.problems.append(f"[迁移链] {chain}/{item.name} 缺少 revision 定义")
                 continue
-            if rev in revisions:
+            if rev in revisions and judged_file:
                 outcome.problems.append(f"[迁移链] 链 {chain} 内 revision「{rev}」重复")
             revisions[rev] = parent
             labels[rev] = branch_labels
+            sources[rev] = rel
         if not revisions:
             continue
-        parents = {value for value in revisions.values() if value}
-        heads = [rev for rev in revisions if rev not in parents]
-        if len(heads) != 1:
-            outcome.problems.append(
-                f"[迁移链] 链 {chain} 的 head 应为 1 个，实际 {len(heads)} 个：{', '.join(sorted(heads))}"
-            )
-        for rev, parent in revisions.items():
+        judged = sorted(rev for rev in revisions if scope is None or sources[rev] in scope)
+        if scope is None:
+            parents = {value for value in revisions.values() if value}
+            heads = [rev for rev in revisions if rev not in parents]
+            if len(heads) != 1:
+                outcome.problems.append(
+                    f"[迁移链] 链 {chain} 的 head 应为 1 个，实际 {len(heads)} 个：{', '.join(sorted(heads))}"
+                )
+        for rev in judged:
+            parent = revisions[rev]
             if parent and parent not in revisions:
                 outcome.problems.append(f"[迁移链] {chain}/{rev} 的 down_revision「{parent}」不在本链（断链）")
             if parent is None and chain not in labels[rev]:
@@ -619,32 +684,37 @@ def check_alembic_chain(cfg: Config, rule: BackendBaseRules, outcome: Outcome) -
             if parent is not None and labels[rev]:
                 outcome.problems.append(f"[迁移链] {chain}/{rev} 非链首不应声明 branch_labels")
         section = f"[alembic:{chain}]" if chain != rule.default_chain else "[alembic]"
-        if ini_text and section not in ini_text:
+        if scope is None and ini_text and section not in ini_text:
             outcome.problems.append(f"[迁移链] 链 {chain} 未在 alembic.ini 登记配置段 {section}")
-        total += len(revisions)
+        total += len(judged)
     if total == 0:
         out("  （迁移版本目录为空——迁移随后续阶段建立，跳过链检查）")
     return total
 
 
-def collect(cfg: Config, rule: BackendBaseRules) -> tuple[Outcome, list[str]]:
+def collect(cfg: Config, rule: BackendBaseRules, scope: set[str] | None = None) -> tuple[Outcome, list[str]]:
     """执行全部六项校验。
+
+    增量模式（`scope` 非空）只判改动文件涉及的类 / 迁移 / 错误码；继承索引仍按全量构建（血缘推导需要），
+    但判定只落在改动实体上。
 
     Args:
         cfg: 仓配置。
         rule: 规则段。
+        scope: 作用域（仓内相对路径集合；None 表示全量）。
 
     Returns:
         tuple[Outcome, list[str]]: （结果, 步骤结论行）。
     """
     outcome = Outcome()
     index = index_classes(cfg, rule)
-    chains = check_inheritance(cfg, rule, index, outcome)
-    covered = check_manifest_coverage(cfg, rule, index, outcome)
-    direct = check_direct_inheritance(cfg, rule, outcome)
-    shapes = check_data_class_semantics(cfg, rule, index, outcome)
-    codes = check_error_segments(cfg, rule, outcome)
-    revs = check_alembic_chain(cfg, rule, outcome)
+    scoped = None if scope is None else scoped_classes(cfg, rule, scope)
+    chains = check_inheritance(cfg, rule, index, outcome, scoped)
+    covered = check_manifest_coverage(cfg, rule, index, outcome, scoped)
+    direct = check_direct_inheritance(cfg, rule, outcome, scope)
+    shapes = check_data_class_semantics(cfg, rule, index, outcome, scope)
+    codes = check_error_segments(cfg, rule, outcome, scope)
+    revs = check_alembic_chain(cfg, rule, outcome, scope)
     lines = [
         f"1. 继承链对账：检查 {chains} 条相邻关系（实现契约 §7 ↔ 代码）",
         f"2. 清单对账（补充）：直接继承 BaseObject 的 {covered} 个基座类均已登记",
@@ -653,6 +723,11 @@ def collect(cfg: Config, rule: BackendBaseRules) -> tuple[Outcome, list[str]]:
         f"5. 错误码段位：检查 {codes} 个平台码",
         f"6. 迁移链：检查 {revs} 个 revision",
     ]
+    if scope is not None:
+        lines.append(
+            "（增量模式：仅判改动文件涉及的类 / 迁移 / 错误码；单 head 数、alembic.ini 段位与"
+            "「产物有、源码无」类反向判定由推送环承担）"
+        )
     return outcome, lines
 
 
@@ -751,16 +826,17 @@ def self_test() -> int:
     return 0 if ok else 1
 
 
-def run(cfg: Config, *, as_self_test: bool, update_baseline: bool) -> int:
+def run(cfg: Config, *, as_self_test: bool, update_baseline: bool, files_from: str = "") -> int:
     """执行后端基类体系校验。
 
     Args:
         cfg: 仓配置。
         as_self_test: 是否只跑内置自检。
         update_baseline: 是否按当前扫描结果重写直继承基线。
+        files_from: 改动文件清单（增量只判清单内文件；空串全量）。
 
     Returns:
-        int: 退出码（0 通过 / 1 有问题 / 2 规则或登记源缺失）。
+        int: 退出码（0 通过 / 1 有问题 / 2 规则或登记源缺失 / 清单不可读）。
     """
     if as_self_test:
         return self_test()
@@ -777,7 +853,18 @@ def run(cfg: Config, *, as_self_test: bool, update_baseline: bool) -> int:
         if not (cfg.root / rel).is_file():
             out(f"[check_backend_base] {label}缺失：{rel}")
             return 2
-    outcome, lines = collect(cfg, rule)
+    scope: set[str] | None = None
+    if files_from:
+        listed = read_file_list(Path(files_from))
+        if listed is None:
+            return 2
+        root = cfg.root.resolve()
+        scope = {item.resolve().relative_to(root).as_posix() for item in select_files(cfg.root, listed)}
+        out(
+            f"[check_backend_base] 增量模式：只判清单内 {len(scope)} 个文件"
+            "（单 head 数 / alembic.ini 段位 / 反向登记为全仓判据，未判）"
+        )
+    outcome, lines = collect(cfg, rule, scope)
     for line in lines:
         out(line)
     if outcome.problems:
@@ -785,5 +872,14 @@ def run(cfg: Config, *, as_self_test: bool, update_baseline: bool) -> int:
         for item in outcome.problems:
             out("  " + item)
         return 1
-    out("[check_backend_base] 通过：继承链 / 清单登记 / 直继承合法性 / 数据类体系语义 / 错误码段位 / 迁移链全部对齐。")
+    if scope is None:
+        out(
+            "[check_backend_base] 通过：继承链 / 清单登记 / 直继承合法性 / 数据类体系语义 / "
+            "错误码段位 / 迁移链全部对齐。"
+        )
+    else:
+        out(
+            "[check_backend_base] 通过（增量）：清单内文件涉及的类 / 错误码 / 迁移与体系对齐；"
+            "单 head 数、alembic.ini 段位与反向登记为全局判据，本次未判。"
+        )
     return 0

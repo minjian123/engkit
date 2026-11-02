@@ -589,3 +589,83 @@ def test_system_fields_incremental_scopes_to_listed_tables(tmp_path: Path) -> No
     changed.write_text("notes.txt\nother/sys_role.md\n", encoding="utf-8")
     assert system_fields.run(cfg, as_self_test=False, files_from=str(changed)) == 0
     assert system_fields.run(cfg, as_self_test=False, files_from=str(tmp_path / "missing.txt")) == 2
+
+
+def test_backend_base_incremental_scopes_to_listed_files(tmp_path: Path) -> None:
+    """后端基类增量：只判清单内文件涉及的类 / 迁移 / 错误码。"""
+    _backend_repo(tmp_path)
+    cfg = _cfg(tmp_path)
+    # 违规全落在「未改动」文件：全量拦、增量不判
+    legacy = tmp_path / "src/pkg/legacy.py"
+    legacy.write_text(
+        "class Legacy(BaseObject):\n    pass\n\n\nclass Stray(BaseValueObject):\n    pass\n", encoding="utf-8"
+    )
+    (tmp_path / "src/pkg/base.py").write_text(
+        "class BaseObj(object):\n    pass\n\n\nclass BaseMid(BaseObj):\n    pass\n\n\n"
+        "class BaseValueObject(BaseObj):\n    pass\n",
+        encoding="utf-8",
+    )
+    assert backend_base.run(cfg, as_self_test=False, update_baseline=False) == 1
+
+    changed = tmp_path / "changed.txt"
+    changed.write_text("src/pkg/base.py\n", encoding="utf-8")
+    assert backend_base.run(cfg, as_self_test=False, update_baseline=False, files_from=str(changed)) == 0
+
+    # 违规落改动文件：直继承未登记 / 值对象未 frozen dataclass 都拦
+    changed.write_text("src/pkg/legacy.py\n", encoding="utf-8")
+    assert backend_base.run(cfg, as_self_test=False, update_baseline=False, files_from=str(changed)) == 1
+
+    # 继承链增量：改动文件里的类作为子类时，须与实现契约的相邻关系一致
+    (tmp_path / "docs/契约.md").write_text(
+        "## 7. 继承链与代码位置\n\n- `BaseObj → Legacy`。\n\n体系根清单\n\n- `BaseObj`\n", encoding="utf-8"
+    )
+    outcome, _ = backend_base.collect(cfg, cfg.backend_base_rules, {"src/pkg/legacy.py"})
+    assert any("[继承链]" in item for item in outcome.problems)
+
+    # 错误码：模块未改动不判；改动后才判段位
+    changed.write_text("src/pkg/base.py\n", encoding="utf-8")
+    outcome, _ = backend_base.collect(cfg, cfg.backend_base_rules, {"src/pkg/base.py"})
+    assert not any("[错误码]" in item for item in outcome.problems)
+    (tmp_path / "src/errors.py").write_text("class ErrorCode:\n    BAD = 100001\n", encoding="utf-8")
+    outcome, _ = backend_base.collect(cfg, cfg.backend_base_rules, {"src/errors.py"})
+    assert any("[错误码]" in item for item in outcome.problems)
+
+    # 迁移链增量：只判改动 revision 的断链 / 缺 revision / 重复 / 标签
+    versions = tmp_path / "versions/platform/tenant"
+    (versions / "0002_b.py").write_text('revision = "0002"\ndown_revision = "ghost"\n', encoding="utf-8")
+    (versions / "0003_c.py").write_text("down_revision = None\n", encoding="utf-8")
+    (versions / "0004_d.py").write_text('revision = "0004"\ndown_revision = "0001"\n', encoding="utf-8")
+    (versions / "0005_e.py").write_text('revision = "0004"\ndown_revision = "0001"\n', encoding="utf-8")
+    outcome, _ = backend_base.collect(
+        cfg,
+        cfg.backend_base_rules,
+        {
+            "versions/platform/tenant/0002_b.py",
+            "versions/platform/tenant/0003_c.py",
+            "versions/platform/tenant/0004_d.py",
+            "versions/platform/tenant/0005_e.py",
+        },
+    )
+    problems = "\n".join(outcome.problems)
+    assert "down_revision「ghost」" in problems
+    assert "缺少 revision 定义" in problems
+    assert "重复" in problems
+    assert "应声明 branch_labels" not in problems
+
+    # 迁移链全量仍校验单 head（增量下不判）
+    assert backend_base.run(cfg, as_self_test=False, update_baseline=False) == 1
+
+    # 清单不可读 → 2
+    assert (
+        backend_base.run(cfg, as_self_test=False, update_baseline=False, files_from=str(tmp_path / "missing.txt")) == 2
+    )
+
+
+def test_backend_base_incremental_without_source_changes(tmp_path: Path) -> None:
+    """后端基类增量：改动不含源码时六项均无实体可判（跳过而非报错）。"""
+    _backend_repo(tmp_path)
+    cfg = _cfg(tmp_path)
+    (tmp_path / "docs/清单.md").write_text("| x |\n", encoding="utf-8")
+    outcome, lines = backend_base.collect(cfg, cfg.backend_base_rules, {"docs/清单.md"})
+    assert not outcome.problems
+    assert any("增量模式" in line for line in lines)

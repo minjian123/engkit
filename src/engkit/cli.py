@@ -173,6 +173,7 @@ def _build_parser() -> argparse.ArgumentParser:
             action.add_argument("--json", action="store_true", help="以 JSON 输出结果")
         if name in (
             "base",
+            "backend-base",
             "system-fields",
             "bare-collections",
             "snowflake-ids",
@@ -673,7 +674,12 @@ def _cmd_base(args: argparse.Namespace) -> int:
     if name == "backend-base":
         from .base import backend_base
 
-        return backend_base.run(cfg, as_self_test=bool(args.self_test), update_baseline=bool(args.update_baseline))
+        return backend_base.run(
+            cfg,
+            as_self_test=bool(args.self_test),
+            update_baseline=bool(args.update_baseline),
+            files_from=str(args.files_from),
+        )
     if name == "service-boundaries":
         from .base import service_boundaries
 
