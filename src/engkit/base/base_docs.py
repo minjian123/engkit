@@ -16,6 +16,7 @@ from typing import Any
 from ..config import BaseRules, Config, DesignRegistryRules, NamingRules, RuntimeIdentifierRule
 from ..console import out
 from .rules import RulesError, read_text, require
+from .scan_scope import read_file_list, select_files
 
 MIN_KEYS = ("manifest", "base_dirs", "cross_layer")
 """未登记时报错给出的最小键指引。"""
@@ -92,19 +93,48 @@ def _md_files(base: Path) -> list[Path]:
     return sorted(path for path in base.rglob("*.md") if path.is_file())
 
 
-def check_cross_layer(cfg: Config, rule: BaseRules) -> tuple[int, list[str]]:
+def _scoped_md(root: Path, files: list[Path] | None) -> list[Path]:
+    """取本次要判的文档。
+
+    全量模式取目录下全部 `.md`；增量模式只取清单内落在该目录下的 `.md`（判据本身文件局部，
+    与全量等价）。
+
+    Args:
+        root: 文档根目录。
+        files: 改动文件清单（None 表示全量）。
+
+    Returns:
+        list[Path]: 待判文档（字典序）。
+    """
+    if files is None:
+        return _md_files(root)
+    base = root.resolve()
+    picked: list[Path] = []
+    for path in files:
+        if path.suffix != ".md":
+            continue
+        try:
+            path.resolve().relative_to(base)
+        except ValueError:
+            continue
+        picked.append(path)
+    return sorted(picked)
+
+
+def check_cross_layer(cfg: Config, rule: BaseRules, files: list[Path] | None = None) -> tuple[int, list[str]]:
     """① 基座文件不得相对链接到跨层（平台专属）文档。
 
     Args:
         cfg: 仓配置。
         rule: 规则段。
+        files: 改动文件清单（None 全量；增量只判清单内基座文档）。
 
     Returns:
         tuple[int, list[str]]: （命中数, 问题清单）。
     """
     problems: list[str] = []
     for directory in rule.base_dirs:
-        for path in _md_files(cfg.root / directory):
+        for path in _scoped_md(cfg.root / directory, files):
             relative = path.relative_to(cfg.root).as_posix()
             for number, line in enumerate(read_text(path).splitlines(), start=1):
                 for match in LINK_RE.finditer(strip_code(line)):
@@ -123,19 +153,20 @@ def check_cross_layer(cfg: Config, rule: BaseRules) -> tuple[int, list[str]]:
     return len(problems), problems
 
 
-def check_wording(cfg: Config, rule: BaseRules) -> tuple[int, list[str]]:
+def check_wording(cfg: Config, rule: BaseRules, files: list[Path] | None = None) -> tuple[int, list[str]]:
     """② 基座文件不得含项目专属措辞残留。
 
     Args:
         cfg: 仓配置。
         rule: 规则段。
+        files: 改动文件清单（None 全量）。
 
     Returns:
         tuple[int, list[str]]: （命中数, 问题清单）。
     """
     problems: list[str] = []
     for directory in rule.base_dirs:
-        for path in _md_files(cfg.root / directory):
+        for path in _scoped_md(cfg.root / directory, files):
             relative = path.relative_to(cfg.root).as_posix()
             for number, line in enumerate(read_text(path).splitlines(), start=1):
                 for word in rule.bad_wording:
@@ -197,19 +228,20 @@ def check_manifest(cfg: Config, rule: BaseRules) -> tuple[int, int, int, list[st
     return len(entries), disk, len(missing), problems
 
 
-def check_section_refs(cfg: Config, rule: BaseRules) -> tuple[int, list[str]]:
+def check_section_refs(cfg: Config, rule: BaseRules, files: list[Path] | None = None) -> tuple[int, list[str]]:
     """④ 跨文档引用若只写编号（第 N 节 / N.M 节 / N 章）即报警。
 
     Args:
         cfg: 仓配置。
         rule: 规则段。
+        files: 改动文件清单（None 全量）。
 
     Returns:
         tuple[int, list[str]]: （命中数, 问题清单）。
     """
     problems: list[str] = []
     root = cfg.root / (rule.section_ref_root or cfg.docs.root)
-    for path in _md_files(root):
+    for path in _scoped_md(root, files):
         relative = path.relative_to(cfg.root).as_posix()
         stem = path.stem
         for number, line in enumerate(read_text(path).splitlines(), start=1):
@@ -486,33 +518,48 @@ def check_naming(cfg: Config, rule: BaseRules) -> tuple[int, list[str]]:
     return len(found), found
 
 
-def collect(cfg: Config, rule: BaseRules) -> tuple[list[str], list[str]]:
+def collect(cfg: Config, rule: BaseRules, files: list[Path] | None = None) -> tuple[list[str], list[str]]:
     """执行全部六项，返回（输出行, 问题清单）。
+
+    增量模式（`files` 非空）下，文件局部判据（①跨层引用 / ②措辞残留 / ④编号引用）只判清单内文件；
+    全局判据（③清单一致 / ⑤数据库设计登记 / ⑥登记面命名）无法文件化，标注「全局判据，增量模式未判」。
 
     Args:
         cfg: 仓配置。
         rule: 规则段。
+        files: 改动文件清单（None 全量）。
 
     Returns:
         tuple[list[str], list[str]]: （各步骤结论行, 问题清单）。
     """
+    incremental = files is not None
     lines: list[str] = []
     problems: list[str] = []
-    cross, cross_problems = check_cross_layer(cfg, rule)
+    cross, cross_problems = check_cross_layer(cfg, rule, files)
     lines.append(f"1. 基座跨层引用：{cross} 处（应为 0，跨层一律写「平台《文档名》」）")
-    wording, wording_problems = check_wording(cfg, rule)
+    wording, wording_problems = check_wording(cfg, rule, files)
     lines.append(f"2. 项目专属措辞残留：{wording} 处（应为 0）")
-    entries, disk, missing, manifest_problems = check_manifest(cfg, rule)
-    lines.append(f"3. 清单一致：登记 {entries} 个，磁盘 {disk} 个，缺失 {missing} 个")
-    refs, ref_problems = check_section_refs(cfg, rule)
+    if incremental:
+        manifest_problems: list[str] = []
+        lines.append("3. 清单一致：（全局判据，增量模式未判）")
+    else:
+        entries, disk, missing, manifest_problems = check_manifest(cfg, rule)
+        lines.append(f"3. 清单一致：登记 {entries} 个，磁盘 {disk} 个，缺失 {missing} 个")
+    refs, ref_problems = check_section_refs(cfg, rule, files)
     lines.append(f"4. 跨文档编号引用：{refs} 处（应为 0，跨文档引用优先写章节名）")
-    design_line, design_problems = check_design_registry(cfg, rule)
-    lines.append(design_line)
-    naming, naming_problems_found = check_naming(cfg, rule)
-    lines.append(
-        f"6. 登记面命名形态：{naming} 处（应为 0，登记目录 / 包名 / 脚本名与控件键 / 业务动作码 / "
-        "自建图标码一律 snake_case）"
-    )
+    if incremental:
+        design_problems: list[str] = []
+        lines.append("5. 数据库设计登记一致：（全局判据，增量模式未判）")
+        naming_problems_found: list[str] = []
+        lines.append("6. 登记面命名形态：（全局判据，增量模式未判）")
+    else:
+        design_line, design_problems = check_design_registry(cfg, rule)
+        lines.append(design_line)
+        naming, naming_problems_found = check_naming(cfg, rule)
+        lines.append(
+            f"6. 登记面命名形态：{naming} 处（应为 0，登记目录 / 包名 / 脚本名与控件键 / 业务动作码 / "
+            "自建图标码一律 snake_case）"
+        )
     problems.extend(cross_problems + wording_problems + manifest_problems + ref_problems)
     problems.extend(f"[设计登记] {item}" for item in design_problems)
     problems.extend(naming_problems_found)
@@ -705,15 +752,16 @@ def _report(title: str, found: list[str], expect: int) -> int:
     return 0 if flag == "OK" else 1
 
 
-def run(cfg: Config, *, as_self_test: bool) -> int:
+def run(cfg: Config, *, as_self_test: bool, files_from: str = "") -> int:
     """执行基座完整性校验。
 
     Args:
         cfg: 仓配置。
         as_self_test: 是否只跑内置自检。
+        files_from: 改动文件清单（增量模式只判清单内文件；空串全量）。
 
     Returns:
-        int: 退出码（0 通过 / 1 有问题 / 2 规则缺失）。
+        int: 退出码（0 通过 / 1 有问题 / 2 规则缺失或清单不可读）。
     """
     if as_self_test:
         return self_test()
@@ -722,7 +770,17 @@ def run(cfg: Config, *, as_self_test: bool) -> int:
     except RulesError as exc:
         out(f"[base-integrity] {exc}")
         return 2
-    lines, problems = collect(cfg, rule)
+    files: list[Path] | None = None
+    if files_from:
+        listed = read_file_list(Path(files_from))
+        if listed is None:
+            return 2
+        files = select_files(cfg.root, listed)
+        out(
+            f"[base-integrity] 增量模式：只判清单内 {len(files)} 个文件"
+            "（清单一致 / 设计登记 / 命名形态为全局判据，未判）"
+        )
+    lines, problems = collect(cfg, rule, files)
     for line in lines:
         out(line)
     if problems:
@@ -732,8 +790,14 @@ def run(cfg: Config, *, as_self_test: bool) -> int:
         if len(problems) > 50:
             out(f"  ... 其余 {len(problems) - 50} 项")
         return 1
-    out(
-        "\n[base-integrity] 通过：无跨层引用、无措辞残留、清单与磁盘一致、跨文档引用均写章节名、"
-        "数据库设计登记一致、登记面命名均为 snake_case。"
-    )
+    if files is None:
+        out(
+            "\n[base-integrity] 通过：无跨层引用、无措辞残留、清单与磁盘一致、跨文档引用均写章节名、"
+            "数据库设计登记一致、登记面命名均为 snake_case。"
+        )
+    else:
+        out(
+            "\n[base-integrity] 通过（增量）：清单内文件无跨层引用、无措辞残留、跨文档引用均写章节名；"
+            "清单一致 / 设计登记 / 命名形态为全局判据，本次未判。"
+        )
     return 0

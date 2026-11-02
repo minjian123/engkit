@@ -171,11 +171,21 @@ def _build_parser() -> argparse.ArgumentParser:
             action.add_argument("--update-baseline", action="store_true", help="按当前扫描结果重写基线")
         if name in ("service-boundaries", "bare-collections", "product-literals"):
             action.add_argument("--json", action="store_true", help="以 JSON 输出结果")
-        if name in ("bare-collections", "snowflake-ids", "test-db-isolation", "product-literals"):
+        if name in (
+            "base",
+            "system-fields",
+            "bare-collections",
+            "snowflake-ids",
+            "test-db-isolation",
+            "product-literals",
+        ):
             action.add_argument(
                 "--files-from",
                 default="",
-                help="只扫清单内文件（一行一个相对仓根路径；增量模式，规则为文件局部故与全量等价）",
+                help=(
+                    "只扫清单内文件（一行一个相对仓根路径；增量模式，规则为文件局部故与全量等价）；"
+                    "`base` 的全局判据（清单一致 / 设计登记 / 命名形态）在增量模式下不判"
+                ),
             )
         if name == "test-db-isolation":
             action.add_argument(
@@ -659,7 +669,7 @@ def _cmd_base(args: argparse.Namespace) -> int:
     if name == "base":
         from .base import base_docs
 
-        return base_docs.run(cfg, as_self_test=bool(args.self_test))
+        return base_docs.run(cfg, as_self_test=bool(args.self_test), files_from=str(args.files_from))
     if name == "backend-base":
         from .base import backend_base
 
@@ -698,7 +708,7 @@ def _cmd_base(args: argparse.Namespace) -> int:
     if name == "system-fields":
         from .base import system_fields
 
-        return system_fields.run(cfg, as_self_test=bool(args.self_test))
+        return system_fields.run(cfg, as_self_test=bool(args.self_test), files_from=str(args.files_from))
     if name == "snowflake-ids":
         from .base import snowflake_ids
 

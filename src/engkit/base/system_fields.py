@@ -14,6 +14,7 @@ from pathlib import Path
 from ..config import Config, RegistrySpec, SystemFieldsRules
 from ..console import out
 from .rules import RulesError, read_text, require
+from .scan_scope import read_file_list, select_files
 
 MIN_KEYS = ("catalog", "datasource", "table_dir")
 """未登记时报错给出的最小键指引。"""
@@ -320,12 +321,13 @@ def diff_data_source_closure(pairs: list[tuple[str, str]], known_keys: set[str])
     return issues
 
 
-def load_table_texts(cfg: Config, rule: SystemFieldsRules) -> dict[str, str]:
-    """读取表文件目录下全部表文件文本。
+def load_table_texts(cfg: Config, rule: SystemFieldsRules, files: list[Path] | None = None) -> dict[str, str]:
+    """读取表文件文本。
 
     Args:
         cfg: 仓配置。
         rule: 规则段。
+        files: 改动文件清单（None 全量；增量只取清单内落在表目录下的 `.md`）。
 
     Returns:
         dict[str, str]: {表名: 文本}。
@@ -333,20 +335,37 @@ def load_table_texts(cfg: Config, rule: SystemFieldsRules) -> dict[str, str]:
     directory = cfg.root / rule.table_dir
     if not directory.is_dir():
         return {}
-    return {item.stem: read_text(item) for item in sorted(directory.glob("*.md"))}
+    if files is None:
+        return {item.stem: read_text(item) for item in sorted(directory.glob("*.md"))}
+    base = directory.resolve()
+    texts: dict[str, str] = {}
+    for path in files:
+        if path.suffix != ".md":
+            continue
+        try:
+            path.resolve().relative_to(base)
+        except ValueError:
+            continue
+        texts[path.stem] = read_text(path)
+    return texts
 
 
-def collect_problems(cfg: Config, rule: SystemFieldsRules) -> list[str]:
+def collect_problems(cfg: Config, rule: SystemFieldsRules, files: list[Path] | None = None) -> list[str]:
     """执行全部校验项，返回问题清单。
+
+    增量模式（`files` 非空）只判清单内的表文件：清单侧同样裁到这些表，因此「跨表全局唯一」
+    只覆盖清单内表（未改动表的一致性由上一次提交保证）。
 
     Args:
         cfg: 仓配置。
         rule: 规则段。
+        files: 改动文件清单（None 全量）。
 
     Returns:
         list[str]: 问题描述。
     """
     problems: list[str] = []
+    texts = load_table_texts(cfg, rule, files)
     catalog = [
         (record[rule.catalog.key_field], record[rule.catalog.table_field])
         for record in parse_records(cfg, rule.catalog)
@@ -355,11 +374,12 @@ def collect_problems(cfg: Config, rule: SystemFieldsRules) -> list[str]:
     if not catalog:
         problems.append(f"[form_key] 清单不可解析或为空：{rule.catalog.path}")
         return problems
+    scoped = [item for item in catalog if files is None or item[1] in texts]
     problems.extend(
         f"[form_key] {item}"
         for item in diff_form_catalog(
-            catalog,
-            load_table_texts(cfg, rule),
+            scoped,
+            texts,
             row_form_key=rule.row_form_key,
             row_parent_id=rule.row_parent_id,
             table_dir=rule.table_dir,
@@ -378,6 +398,9 @@ def collect_problems(cfg: Config, rule: SystemFieldsRules) -> list[str]:
         for record in parse_records(cfg, rule.catalog)
         if record.get(rule.catalog.key_field)
     ]
+    if files is not None:
+        scoped_keys = {form_key for form_key, _ in scoped}
+        pairs = [item for item in pairs if item[0] in scoped_keys]
     problems.extend(f"[data_source_key] {item}" for item in diff_data_source_closure(pairs, known_keys))
     for label, spec in (("[form_key]", rule.catalog), ("[data_source_key]", rule.datasource)):
         if not spec.enum:
@@ -468,15 +491,16 @@ def _report(title: str, found: list[str], expect: int) -> int:
     return 0 if flag == "OK" else 1
 
 
-def run(cfg: Config, *, as_self_test: bool) -> int:
+def run(cfg: Config, *, as_self_test: bool, files_from: str = "") -> int:
     """执行系统字段校验。
 
     Args:
         cfg: 仓配置。
         as_self_test: 是否只跑内置自检。
+        files_from: 改动文件清单（增量只判清单内表；空串全量）。
 
     Returns:
-        int: 退出码（0 通过 / 1 有问题 / 2 规则缺失）。
+        int: 退出码（0 通过 / 1 有问题 / 2 规则缺失或清单不可读）。
     """
     if as_self_test:
         return self_test()
@@ -485,7 +509,14 @@ def run(cfg: Config, *, as_self_test: bool) -> int:
     except RulesError as exc:
         out(f"[system-fields] {exc}")
         return 2
-    problems = collect_problems(cfg, rule)
+    files: list[Path] | None = None
+    if files_from:
+        listed = read_file_list(Path(files_from))
+        if listed is None:
+            return 2
+        files = select_files(cfg.root, listed)
+        out(f"[system-fields] 增量模式：只判清单内 {len(files)} 个文件（跨表全局唯一仅限清单内表）")
+    problems = collect_problems(cfg, rule, files)
     if problems:
         out(f"[system-fields] 不通过：{len(problems)} 项")
         for item in problems[:50]:

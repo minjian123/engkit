@@ -511,3 +511,81 @@ def test_docs_status_rule_branches(tmp_path: Path, capsys: pytest.CaptureFixture
     (stage / "任务/01_域/01_任务/实施").rmdir()
     assert docs_status.run(cfg, stage="", all_stages=False, strict=True) == 1
     capsys.readouterr()
+
+
+def test_base_docs_incremental_scopes_to_listed_files(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """增量模式：文件局部判据只判清单内文档，全局判据标注「未判」。"""
+    cfg = _cfg(tmp_path)
+    (tmp_path / "docs/规范").mkdir(parents=True)
+    clean = tmp_path / "docs/规范/clean.md"
+    dirty = tmp_path / "docs/规范/other.md"
+    clean.write_text("# 规范\n", encoding="utf-8")
+    dirty.write_text("# 本项目项目\n", encoding="utf-8")
+    # 全量模式：清单未登记（全局判据）→ 不通过
+    assert base_docs.run(cfg, as_self_test=False) == 1
+
+    changed = tmp_path / "changed.txt"
+    changed.write_text("docs/规范/clean.md\n", encoding="utf-8")
+    # 增量模式：只判清单内干净文件 → 通过（清单一致等全局判据不判）
+    assert base_docs.run(cfg, as_self_test=False, files_from=str(changed)) == 0
+    lines, problems = base_docs.collect(cfg, cfg.base_rules, [clean])
+    assert not problems
+    assert any("全局判据，增量模式未判" in line for line in lines)
+    # 增量模式的结论文案不得宣称全局判据通过
+    capsys.readouterr()
+    assert base_docs.run(cfg, as_self_test=False, files_from=str(changed)) == 0
+    printed = capsys.readouterr().out
+    assert "通过（增量）" in printed
+    assert "清单与磁盘一致" not in printed
+
+    changed.write_text("docs/规范/other.md\n", encoding="utf-8")
+    assert base_docs.run(cfg, as_self_test=False, files_from=str(changed)) == 1
+
+    # 清单内的非 md 文件与基座目录外文档一律跳过（不参与判定）
+    (tmp_path / "notes.txt").write_text("x", encoding="utf-8")
+    outside = tmp_path / "src/notes.md"
+    outside.parent.mkdir()
+    outside.write_text("# 本项目项目\n", encoding="utf-8")
+    changed.write_text("notes.txt\nsrc/notes.md\ndocs/规范/clean.md\n", encoding="utf-8")
+    assert base_docs.run(cfg, as_self_test=False, files_from=str(changed)) == 0
+
+    # 清单不可读 → 2（规则/环境错误）
+    assert base_docs.run(cfg, as_self_test=False, files_from=str(tmp_path / "missing.txt")) == 2
+
+
+def test_system_fields_incremental_scopes_to_listed_tables(tmp_path: Path) -> None:
+    """系统字段增量：只判清单内表文件（跨表全局唯一仅限清单内表）。"""
+    cfg = _cfg(tmp_path)
+    (tmp_path / "src").mkdir(parents=True)
+    (tmp_path / "src/forms.py").write_text(
+        "class FormKind(StrEnum):\n    DICT = 'dict'\n\n"
+        "FORM_CATALOG = (\n"
+        "    FormRecord(form_key='role', table='sys_role', data_source_key='role', kind=FormKind.DICT.value),\n"
+        ")\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "src/datasource.py").write_text(
+        "class DataSourceKind(StrEnum):\n    DICT = 'dict'\n\n"
+        "DATA_SOURCE_CATALOG = (\n"
+        "    SourceRecord(data_source_key='role', kind=DataSourceKind.DICT.value),\n"
+        ")\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "docs/表").mkdir(parents=True)
+    (tmp_path / "docs/表/sys_role.md").write_text("| `form_key` | x |\n| `parent_id` | x |\n", encoding="utf-8")
+    # 未登记的存量表：全量判据会报「表文件有 form_key 行但未登记清单」
+    (tmp_path / "docs/表/sys_stale.md").write_text("| `form_key` | x |\n", encoding="utf-8")
+    assert system_fields.run(cfg, as_self_test=False) == 1
+
+    changed = tmp_path / "changed.txt"
+    changed.write_text("docs/表/sys_role.md\n", encoding="utf-8")
+    assert system_fields.run(cfg, as_self_test=False, files_from=str(changed)) == 0
+
+    # 清单内的非 md 文件与表目录外文件一律跳过（不参与判定）
+    (tmp_path / "notes.txt").write_text("x", encoding="utf-8")
+    outside = tmp_path / "other/sys_role.md"
+    outside.parent.mkdir()
+    outside.write_text("| `form_key` | x |\n", encoding="utf-8")
+    changed.write_text("notes.txt\nother/sys_role.md\n", encoding="utf-8")
+    assert system_fields.run(cfg, as_self_test=False, files_from=str(changed)) == 0
+    assert system_fields.run(cfg, as_self_test=False, files_from=str(tmp_path / "missing.txt")) == 2
