@@ -69,3 +69,27 @@ def test_default_rules_cover_samples(cfg) -> None:
     assert docs_scope.scan_text("工时 8h", cfg)
     assert docs_scope.scan_text("M2 达成", cfg)
     assert not docs_scope.scan_text("RTO ≤4h，版本 3.14", cfg)
+
+
+def test_check_incremental_scopes_to_listed_files(build_repo) -> None:
+    """增量：只判清单内文档（非 md / 文档根外文件跳过）。"""
+    root = build_repo(files={"docs/项目/X/任务/01_任务/02_子.md": "# 子\n\n本任务 4h 交付。\n"})
+    cfg = load(root / "engkit.toml")
+    bad = root / "docs/项目/X/任务/01_任务/02_子.md"
+    clean = sorted((root / "docs").rglob("*.md"))
+    clean = [item for item in clean if item != bad]
+
+    only_clean = docs_scope.check(cfg, clean)
+    assert only_clean.findings == ()
+    judged = [item for item in clean if not docs_scope.is_whitelisted(item.relative_to(root / "docs").as_posix(), cfg)]
+    assert only_clean.files == len(judged)
+
+    outside = root / "src/notes.md"
+    outside.parent.mkdir(parents=True, exist_ok=True)
+    outside.write_text("本任务 4h 交付。\n", encoding="utf-8")
+    notes = root / "notes.txt"
+    notes.write_text("本任务 4h 交付。\n", encoding="utf-8")
+    scoped = docs_scope.check(cfg, [bad, outside, notes])
+    assert len(scoped.findings) == 1
+    assert scoped.findings[0].file == "项目/X/任务/01_任务/02_子.md"
+    assert scoped.files == 1

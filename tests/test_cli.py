@@ -314,3 +314,18 @@ def test_base_product_literals_cli(repo: Path, capsys) -> None:
     assert cli.main(["base", "product-literals", "--root", str(repo)]) == 1
     assert "check_product_literals" in capsys.readouterr().out
     assert cli.main(["base", "product-literals", "--root", str(repo), "--self-test"]) == 0
+
+
+def test_docs_scope_files_from(build_repo, capsys) -> None:
+    """口径检查增量：只判清单内文档；清单不可读退 2。"""
+    root = build_repo(files={"docs/项目/X/任务/01/02.md": "# x\n\n本任务 4h\n"})
+    listed = root / "changed.txt"
+    listed.write_text("docs/项目/X/任务/01/02.md\n", encoding="utf-8")
+    assert cli.main(["docs-scope", "--root", str(root), "--files-from", str(listed)]) == 1
+    captured = capsys.readouterr()
+    assert "增量模式" in captured.out
+    assert "违规 1 处" in captured.out
+
+    listed.write_text("README.md\n", encoding="utf-8")
+    assert cli.main(["docs-scope", "--root", str(root), "--files-from", str(listed)]) == 0
+    assert cli.main(["docs-scope", "--root", str(root), "--files-from", str(root / "missing.txt")]) == 2

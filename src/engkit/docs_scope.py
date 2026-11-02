@@ -7,7 +7,9 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
+from pathlib import Path
 
 from .config import Config
 
@@ -111,11 +113,14 @@ def scan_text(text: str, cfg: Config) -> tuple[ScopeFinding, ...]:
     return tuple(findings)
 
 
-def check(cfg: Config) -> ScopeReport:
-    """执行全量口径检查。
+def check(cfg: Config, files: Sequence[Path] | None = None) -> ScopeReport:
+    """执行口径检查（可限定为改动文件清单 = 增量模式）。
+
+    判据是逐文件的（`scan_text` 只看单份文档），增量模式与全量在清单内文档上结果一致。
 
     Args:
         cfg: 仓配置。
+        files: 改动文件（绝对路径；None 表示全量扫文档根）。
 
     Returns:
         ScopeReport: 检查结果。
@@ -126,13 +131,39 @@ def check(cfg: Config) -> ScopeReport:
     docs_root = cfg.docs_root
     if not docs_root.is_dir():
         raise FileNotFoundError(f"未找到文档根目录：{docs_root}")
-    files = 0
+    scanned = 0
     findings: list[ScopeFinding] = []
-    for path in sorted(docs_root.rglob("*.md")):
+    for path in _iter_docs(cfg, docs_root, files):
         rel = path.relative_to(docs_root).as_posix()
         if is_whitelisted(rel, cfg):
             continue
-        files += 1
+        scanned += 1
         for item in scan_text(path.read_text(encoding="utf-8", errors="ignore"), cfg):
             findings.append(ScopeFinding(file=rel, line=item.line, label=item.label, snippet=item.snippet))
-    return ScopeReport(files=files, findings=tuple(findings))
+    return ScopeReport(files=scanned, findings=tuple(findings))
+
+
+def _iter_docs(cfg: Config, docs_root: Path, files: Sequence[Path] | None) -> list[Path]:
+    """枚举待判文档（全量：文档根下全部 `.md`；增量：清单内落在文档根下的 `.md`）。
+
+    Args:
+        cfg: 仓配置。
+        docs_root: 文档根。
+        files: 改动文件（None 表示全量）。
+
+    Returns:
+        list[Path]: 待判文档（字典序）。
+    """
+    if files is None:
+        return sorted(docs_root.rglob("*.md"))
+    base = docs_root.resolve()
+    picked: list[Path] = []
+    for path in files:
+        if path.suffix != ".md":
+            continue
+        try:
+            path.resolve().relative_to(base)
+        except ValueError:
+            continue
+        picked.append(path)
+    return sorted(picked)

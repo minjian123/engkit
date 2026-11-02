@@ -12,6 +12,7 @@ import sys
 from pathlib import Path
 
 from . import coverage, devloop, docs_links, docs_scope, eol, gitutil, guard, kiwi, preflight, push, selection
+from .base import scan_scope
 from .config import CONFIG_NAME, Config, ConfigError, load_for
 from .console import configure_stdio, error, out
 
@@ -38,6 +39,11 @@ def _build_parser() -> argparse.ArgumentParser:
 
     scope = subparsers.add_parser("docs-scope", parents=[common], help="文档口径护栏（进度类字段落点）")
     scope.add_argument("--self-test", action="store_true", help="只跑内置判定向量")
+    scope.add_argument(
+        "--files-from",
+        default="",
+        help="只判清单内文档（一行一个相对仓根路径；增量模式，判据为文件局部故与全量等价）",
+    )
 
     choose = subparsers.add_parser("selection", parents=[common], help="变更 → 受影响测试 / 前端包")
     choose.add_argument("--scope", default="backend", choices=("backend", "frontend"), help="推导范围")
@@ -286,8 +292,15 @@ def _cmd_docs_scope(args: argparse.Namespace) -> int:
     cfg = _load(args)
     if args.self_test:
         return _scope_self_test(cfg)
+    files: list[Path] | None = None
+    if args.files_from:
+        listed = scan_scope.read_file_list(Path(str(args.files_from)))
+        if listed is None:
+            return 2
+        files = scan_scope.select_files(cfg.root, listed)
+        out(f"[docs-scope] 增量模式：只判清单内 {len(files)} 个文件")
     try:
-        report = docs_scope.check(cfg)
+        report = docs_scope.check(cfg, files)
     except FileNotFoundError as exc:
         error(f"[docs-scope] {exc}")
         return 2
