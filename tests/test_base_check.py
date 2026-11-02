@@ -680,3 +680,34 @@ def test_backend_base_incremental_without_source_changes(tmp_path: Path) -> None
     outcome, lines = backend_base.collect(cfg, cfg.backend_base_rules, {"docs/清单.md"})
     assert not outcome.problems
     assert any("增量模式" in line for line in lines)
+
+
+def test_docs_status_incremental_scope(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """文档一致性增量：只核清单命中的阶段；无命中即跳过；清单不可读退 2。"""
+    _status_stage(tmp_path)
+    cfg = _cfg(tmp_path)
+    assert docs_status.run(cfg, stage="", all_stages=False, strict=False) == 0
+
+    bad = tmp_path / "docs/项目/02_阶段"
+    for name in ("需求", "计划", "任务"):
+        (bad / name).mkdir(parents=True)
+    (bad / "需求/00_需求_总览.md").write_text("| 编号 | 标题 |\n| --- | --- |\n| 02-9 | z |\n", encoding="utf-8")
+    (bad / "需求/02_需求_域.md").write_text("## 1. 需求 02-1：z\n", encoding="utf-8")
+    (bad / "计划/02_计划_阶段.md").write_text("# 计划\n", encoding="utf-8")
+
+    changed = tmp_path / "changed.txt"
+    changed.write_text("docs/项目/02_阶段/需求/02_需求_域.md\n", encoding="utf-8")
+    # 增量 + --all：只核 02_阶段（坏）→ 1
+    assert docs_status.run(cfg, stage="", all_stages=True, strict=False, files_from=str(changed)) == 1
+    # 增量 + 指定 01_阶段：交集为空 → 0 并标注不涉及
+    capsys.readouterr()
+    assert docs_status.run(cfg, stage="01_阶段", all_stages=False, strict=False, files_from=str(changed)) == 0
+    assert "不涉及阶段文档" in capsys.readouterr().out
+    # 增量 + 命中自洽阶段 → 0
+    changed.write_text("docs/项目/01_阶段/需求/01_需求_域.md\n", encoding="utf-8")
+    assert docs_status.run(cfg, stage="", all_stages=True, strict=False, files_from=str(changed)) == 0
+    # 清单里非阶段路径跳过；命中不存在的阶段目录按「跳过」处理
+    changed.write_text("README.md\ndocs/项目/03_阶段/需求/03_需求_域.md\n", encoding="utf-8")
+    assert docs_status.run(cfg, stage="03_阶段", all_stages=False, strict=False, files_from=str(changed)) == 0
+    # 清单不可读 → 2
+    assert docs_status.run(cfg, stage="", all_stages=False, strict=False, files_from=str(tmp_path / "x.txt")) == 2

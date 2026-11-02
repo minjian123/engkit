@@ -16,6 +16,7 @@ from pathlib import Path
 from ..config import Config, DocsStatusRules
 from ..console import out
 from .rules import RulesError, require
+from .scan_scope import read_file_list
 
 MIN_KEYS = ("project_dir", "stage", "statuses", "todo_statuses")
 """未登记时报错给出的最小键指引。"""
@@ -559,17 +560,45 @@ def check_stage(stage_dir: Path, report: Report, spec: Spec, req_index: dict[str
             report.fail("软", "S3", f"已完成任务缺 {record_names} 记录：{plan_id}（{base.name}）")
 
 
-def run(cfg: Config, *, stage: str, all_stages: bool, strict: bool) -> int:
+def affected_stages(project_root: Path, project_dir: str, listed: list[str]) -> set[str]:
+    """取清单命中的阶段目录名。
+
+    Args:
+        project_root: 阶段根目录。
+        project_dir: 阶段根相对仓根的路径（用于匹配清单相对路径）。
+        listed: 改动文件清单（相对仓根）。
+
+    Returns:
+        set[str]: 阶段目录名集合。
+    """
+    names = {item.name for item in project_root.iterdir() if item.is_dir()}
+    prefix = f"{project_dir}/"
+    hit: set[str] = set()
+    for rel in listed:
+        if not rel.startswith(prefix):
+            continue
+        head = rel[len(prefix) :].split("/", 1)[0]
+        if head in names:
+            hit.add(head)
+    return hit
+
+
+def run(cfg: Config, *, stage: str, all_stages: bool, strict: bool, files_from: str = "") -> int:
     """执行需求 / 任务 / 计划一致性核对。
+
+    增量模式（`files_from` 非空）按「受影响阶段」收敛：清单里有文档落在某阶段目录下，就只核对那些阶段。
+    阶段内的三向对账（需求总览 ↔ 域需求 ↔ 任务 ↔ 计划）是判据本身，必须整段核，不能只判单份文档；
+    因此这里收敛的是**实体范围**（阶段），不是文件。
 
     Args:
         cfg: 仓配置。
         stage: 阶段目录名（空串取配置缺省）。
         all_stages: 是否核对全部阶段。
         strict: 软提示是否同样阻断。
+        files_from: 改动文件清单（增量只核受影响阶段；空串全量）。
 
     Returns:
-        int: 退出码（0 通过 / 1 有不合规 / 2 规则或目录缺失）。
+        int: 退出码（0 通过 / 1 有不合规 / 2 规则或目录缺失 / 清单不可读）。
     """
     try:
         rule = require(cfg.docs_status_rules, "docs_status", MIN_KEYS)
@@ -586,6 +615,16 @@ def run(cfg: Config, *, stage: str, all_stages: bool, strict: bool) -> int:
         if all_stages
         else [project_root / (stage or rule.stage)]
     )
+    if files_from:
+        listed = read_file_list(Path(files_from))
+        if listed is None:
+            return 2
+        affected = affected_stages(project_root, rule.project_dir, listed)
+        stages = [item for item in stages if item.name in affected]
+        out(f"[docs-status] 增量模式：只核对受影响阶段 {len(stages)} 个（阶段内三向对账仍需整段核）")
+        if not stages:
+            out("[docs-status] 通过：本次改动不涉及阶段文档")
+            return 0
     if all_stages:
         out("提示：--all 含历史阶段，其文档可能为早期口径，结果仅供人工参考")
 

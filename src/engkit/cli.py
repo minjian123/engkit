@@ -222,6 +222,11 @@ def _build_parser() -> argparse.ArgumentParser:
             action.add_argument("--stage", default="", help="阶段目录名（缺省取配置）")
             action.add_argument("--all", action="store_true", help="核对全部阶段")
             action.add_argument("--strict", action="store_true", help="软提示同样阻断")
+            action.add_argument(
+                "--files-from",
+                default="",
+                help="只核对清单命中的阶段（一行一个相对仓根路径；阶段内三向对账仍需整段核）",
+            )
         if name == "boundary-metrics":
             action.add_argument("--metrics-url", default="", help="运行期指标端点（可选）")
             action.add_argument("--out", default="", help="结果写为 JSON")
@@ -776,7 +781,13 @@ def _cmd_base(args: argparse.Namespace) -> int:
         )
     from .base import docs_status
 
-    return docs_status.run(cfg, stage=str(args.stage), all_stages=bool(args.all), strict=bool(args.strict))
+    return docs_status.run(
+        cfg,
+        stage=str(args.stage),
+        all_stages=bool(args.all),
+        strict=bool(args.strict),
+        files_from=str(args.files_from),
+    )
 
 
 _HANDLERS = {
