@@ -557,3 +557,32 @@ def test_cli_dispatch(tmp_path: Path) -> None:
     assert cli.main(["base", "service-boundaries", "--self-test", *args]) == 0
     assert cli.main(["base", "service-boundaries", "--json", *args]) in (0, 1)
     assert cli.main(["base", "boundary-metrics", *args]) in (0, 1)
+
+
+def test_metrics_incremental_scope(tmp_path: Path) -> None:
+    """度量增量：只采清单内文件，输出标注采集范围；清单不可读退 2。"""
+    root = build(tmp_path)
+    cfg = cfg_of(root, sample())
+    sb.write_files(root, {"pkg/services/alpha/src/alpha/api/m.py": '__tablename__ = "sys_alpha"\n'})
+    changed = tmp_path / "changed.txt"
+    changed.write_text("pkg/services/alpha/src/alpha/api/m.py\n", encoding="utf-8")
+    assert metrics.run(cfg, metrics_url="", out_path="", fail_on_violation=True, files_from=str(changed)) == 1
+
+    target = tmp_path / "inc.json"
+    assert metrics.run(cfg, metrics_url="", out_path=str(target), fail_on_violation=False, files_from=str(changed)) == 0
+    assert json.loads(target.read_text(encoding="utf-8"))["scope"] == "changed"
+    assert (
+        metrics.run(cfg, metrics_url="", out_path="", fail_on_violation=False, files_from=str(tmp_path / "x.txt")) == 2
+    )
+
+
+def test_metrics_runtime_unreachable(monkeypatch: pytest.MonkeyPatch) -> None:
+    """运行期端点不可达：降级标注，不抛错。"""
+
+    def _boom(*args: object, **kwargs: object) -> object:
+        raise OSError("端点不可达")
+
+    monkeypatch.setattr(metrics.urllib.request, "urlopen", _boom)
+    payload = metrics.scrape_runtime("http://127.0.0.1:9/metrics", "demo_boundary_total")
+    assert payload["available"] is False
+    assert "不可达" in str(payload["reason"])

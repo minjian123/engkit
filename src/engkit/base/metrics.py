@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import re
 import urllib.request
+from collections.abc import Sequence
 from datetime import date
 from pathlib import Path
 
@@ -21,6 +22,7 @@ from ..config import Config, MetricsRules
 from ..console import out
 from . import service_boundaries
 from .rules import RulesError, require
+from .scan_scope import read_file_list, select_files
 
 MIN_KEYS = ("violation_keys", "cross_access_key", "registered_exceptions_key", "metric_name")
 """未登记时报错给出的最小键指引。"""
@@ -41,11 +43,12 @@ def metric_line_pattern(metric_name: str) -> re.Pattern[str]:
     return re.compile(rf"^{re.escape(metric_name)}(?:\{{[^}}]*\}})?\s+([0-9.eE+]+)\s*$", re.MULTILINE)
 
 
-def run_static(cfg: Config) -> dict[str, object]:
+def run_static(cfg: Config, changed: Sequence[str] | None = None) -> dict[str, object]:
     """运行静态边界校验并取其结果（结构同 `service-boundaries --json`）。
 
     Args:
         cfg: 仓配置。
+        changed: 增量模式的改动文件清单（相对仓根；None 表示全量）。
 
     Returns:
         dict[str, object]: 校验结果（`counts` / `problems` / `passed`）；规则缺失时 `error`。
@@ -55,7 +58,7 @@ def run_static(cfg: Config) -> dict[str, object]:
     except RulesError as exc:
         return {"error": str(exc)}
     try:
-        outcome = service_boundaries.check(cfg, boundaries)
+        outcome = service_boundaries.check(cfg, boundaries, changed=changed)
     except (RulesError, service_boundaries.RegistryError) as exc:
         return {"error": f"边界校验不可执行：{exc}"}
     return {"passed": not outcome.problems, "counts": dict(outcome.counts), "problems": list(outcome.problems)}
@@ -152,7 +155,7 @@ def report(payload: dict[str, object], rule: MetricsRules) -> None:
         out(f"  运行时：未采集（{runtime.get('reason')}）")
 
 
-def run(cfg: Config, *, metrics_url: str, out_path: str, fail_on_violation: bool) -> int:
+def run(cfg: Config, *, metrics_url: str, out_path: str, fail_on_violation: bool, files_from: str = "") -> int:
     """采集静态与运行时计数并打印 / 落盘。
 
     Args:
@@ -160,20 +163,29 @@ def run(cfg: Config, *, metrics_url: str, out_path: str, fail_on_violation: bool
         metrics_url: 运行期指标端点（空串表示未配置）。
         out_path: 结果写为 JSON 的路径（空串表示只打印）。
         fail_on_violation: 静态越界非零时退码 1。
+        files_from: 改动文件清单（增量模式只扫清单内文件；空串全量）。
 
     Returns:
-        int: 退出码（0 采集完成 / 1 有越界 / 2 规则未登记）。
+        int: 退出码（0 采集完成 / 1 有越界 / 2 规则未登记 / 清单不可读）。
     """
     try:
         rule = require(cfg.metrics_rules, "metrics", MIN_KEYS)
     except RulesError as exc:
         out(f"[boundary_metrics] {exc}")
         return 2
-    static = run_static(cfg)
+    changed: list[str] | None = None
+    if files_from:
+        listed = read_file_list(Path(files_from))
+        if listed is None:
+            return 2
+        changed = [item.relative_to(cfg.root.resolve()).as_posix() for item in select_files(cfg.root, listed)]
+        out(f"[boundary_metrics] 增量模式：只采清单内 {len(changed)} 个文件（跨服务表名 / 归属对账等全局判据恒全量）")
+    static = run_static(cfg, changed)
     runtime = scrape_runtime(metrics_url, rule.metric_name)
     summary = summarize(static, rule)
     payload: dict[str, object] = {
         "collected_at": date.today().isoformat(),
+        "scope": "full" if changed is None else "changed",
         "static": static,
         "runtime": runtime,
         "summary": summary,

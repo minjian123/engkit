@@ -220,6 +220,11 @@ def _build_parser() -> argparse.ArgumentParser:
             action.add_argument("--metrics-url", default="", help="运行期指标端点（可选）")
             action.add_argument("--out", default="", help="结果写为 JSON")
             action.add_argument("--fail-on-violation", action="store_true", help="静态越界非零时退码 1")
+            action.add_argument(
+                "--files-from",
+                default="",
+                help="只采清单内文件（一行一个相对仓根路径；增量模式，全局判据仍全量）",
+            )
 
     return parser
 
@@ -700,6 +705,7 @@ def _cmd_base(args: argparse.Namespace) -> int:
             metrics_url=str(args.metrics_url),
             out_path=str(args.out),
             fail_on_violation=bool(args.fail_on_violation),
+            files_from=str(args.files_from),
         )
     if name == "bare-collections":
         from .base import bare_collections
