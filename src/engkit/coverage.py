@@ -19,6 +19,21 @@ SOURCE_MARKER = "src"
 
 
 @dataclass(frozen=True)
+class ModuleGap:
+    """单模块覆盖率缺口（分钟级定位用：缺哪些行、哪些分支没走全）。
+
+    Attributes:
+        module: 模块名（`src` 之后的点分路径）。
+        lines: 未覆盖行号（升序）。
+        branches: 未走全的分支（`from->to`；漏异常分支的 `to` 记为 `?`）。
+    """
+
+    module: str
+    lines: tuple[int, ...]
+    branches: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class Totals:
     """覆盖率汇总（按门禁范围过滤后）。
 
@@ -28,6 +43,7 @@ class Totals:
         partial_branches: 未走全的分支数。
         percent: 行 + 分支合并百分比（0~100）。
         missing_modules: 存在缺行 / 缺分支的模块名（供扩圈）。
+        gaps: 逐模块缺口明细（未达标时逐条打印，便于直接定位）。
     """
 
     files: int
@@ -35,6 +51,7 @@ class Totals:
     partial_branches: int
     percent: float
     missing_modules: tuple[str, ...]
+    gaps: tuple[ModuleGap, ...] = ()
 
     @property
     def passed(self) -> bool:
@@ -188,6 +205,7 @@ def filtered_totals(payload: Any, modules: tuple[str, ...] | list[str]) -> Total
     covered = 0
     statements = 0
     missing_modules: list[str] = []
+    gaps: list[ModuleGap] = []
     for path, entry in files.items():
         if not module_matches(str(path), modules):
             continue
@@ -200,7 +218,15 @@ def filtered_totals(payload: Any, modules: tuple[str, ...] | list[str]) -> Total
         statements += int(summary.get("num_statements") or 0)
         covered += int(summary.get("covered_lines") or 0)
         if lines_missing or branches_partial:
-            missing_modules.append(module_name(str(path)))
+            name = module_name(str(path))
+            missing_modules.append(name)
+            gaps.append(
+                ModuleGap(
+                    module=name,
+                    lines=tuple(int(number) for number in (entry.get("missing_lines") or [])),
+                    branches=tuple(_format_branch(pair) for pair in (entry.get("missing_branches") or [])),
+                )
+            )
     percent = (covered / statements * 100.0) if statements else 0.0
     return Totals(
         files=matched,
@@ -208,7 +234,39 @@ def filtered_totals(payload: Any, modules: tuple[str, ...] | list[str]) -> Total
         partial_branches=partial,
         percent=percent,
         missing_modules=tuple(missing_modules),
+        gaps=tuple(gaps),
     )
+
+
+def _format_branch(pair: Any) -> str:
+    """把 coverage 的分支对格式化为 `from->to`（漏异常分支时 `to` 记为 `?`）。
+
+    Args:
+        pair: 分支对（`[from, to]`，`to` 可能为 None）。
+
+    Returns:
+        str: 可读分支描述。
+    """
+    if not isinstance(pair, list | tuple) or len(pair) != 2:
+        return "?"
+    start, end = pair
+    return f"{start}->{'?' if end is None else end}"
+
+
+def _clip(items: tuple[Any, ...], limit: int = 20) -> str:
+    """截取明细前缀（超出部分给出总数，避免刷屏）。
+
+    Args:
+        items: 待展示明细。
+        limit: 最多展示条数。
+
+    Returns:
+        str: 展示文本。
+    """
+    shown = "、".join(str(item) for item in items[:limit])
+    if len(items) <= limit:
+        return shown
+    return f"{shown} …（共 {len(items)} 处）"
 
 
 def describe(totals: Totals) -> str:
@@ -264,6 +322,13 @@ def check(
             f"（{'、'.join(totals.missing_modules[:10])}）",
             file=sys.stderr,
         )
+        for gap in totals.gaps[:20]:
+            parts: list[str] = []
+            if gap.lines:
+                parts.append(f"缺行 {len(gap.lines)}（{_clip(gap.lines)}）")
+            if gap.branches:
+                parts.append(f"缺分支 {len(gap.branches)}（{_clip(gap.branches)}）")
+            print(f"[coverage]   {gap.module}: {'，'.join(parts)}", file=sys.stderr)
         return 1
     if totals.percent + 1e-9 >= fail_under:
         return 0

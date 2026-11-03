@@ -90,7 +90,9 @@ def test_filtered_totals() -> None:
     payload = {
         "files": {
             "a/src/pkg/core.py": {
-                "summary": {"missing_lines": 2, "num_partial_branches": 1, "num_statements": 10, "covered_lines": 8}
+                "summary": {"missing_lines": 2, "num_partial_branches": 1, "num_statements": 10, "covered_lines": 8},
+                "missing_lines": [3, 4],
+                "missing_branches": [[8, 10], [12, None]],
             },
             "a/src/pkg/util.py": {
                 "summary": {"missing_lines": 0, "num_partial_branches": 0, "num_statements": 5, "covered_lines": 5}
@@ -106,6 +108,9 @@ def test_filtered_totals() -> None:
     assert totals.partial_branches == 1
     assert totals.missing_modules == ("pkg.core",)
     assert totals.passed is False
+    assert [gap.module for gap in totals.gaps] == ["pkg.core"]
+    assert totals.gaps[0].lines == (3, 4)
+    assert totals.gaps[0].branches == ("8->10", "12->?")
     assert "percent=" in coverage.describe(totals)
     assert coverage.filtered_totals(payload, ()).files == 3
     assert coverage.filtered_totals({"files": {}}, ()).percent == 0.0
@@ -136,11 +141,13 @@ def test_check_unmatched_modules(tmp_path: Path, capsys) -> None:
 
 
 def test_check_fail_under_100(tmp_path: Path, capsys) -> None:
-    """100% 口径下缺行即未达标并列出模块。"""
+    """100% 口径下缺行即未达标，并逐模块列出缺的行号 / 分支（可定位）。"""
     base = tmp_path / ".coverage"
     _make_data(base, tmp_path, complete=False)
     assert coverage.check(base, tmp_path / "r.json", ()) == 1
-    assert "未达标：缺行" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert "未达标：缺行" in err
+    assert "sample: 缺行" in err
 
 
 def test_check_low_threshold_pass(tmp_path: Path) -> None:
