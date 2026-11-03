@@ -96,6 +96,16 @@ def _build_parser() -> argparse.ArgumentParser:
     gate.add_argument("--quiet", action="store_true", help="不打印度量行")
     gate.add_argument("--clean", action="store_true", help="判定前先清理旧采集文件")
 
+    gate_changed = subparsers.add_parser(
+        "coverage-changed",
+        parents=[common],
+        help="改动行覆盖率门禁（只判本次 diff 触达的可执行行；清单从标准输入读）",
+    )
+    gate_changed.add_argument("--data-file", required=True, help="覆盖率数据文件基址")
+    gate_changed.add_argument("--out", required=True, help="JSON 报告落点")
+    gate_changed.add_argument("--clean", action="store_true", help="判定前先清理旧采集文件")
+    gate_changed.add_argument("--quiet", action="store_true", help="不打印度量行")
+
     pre = subparsers.add_parser("preflight", parents=[common], help="预检引擎（仅 CI 可手动调用；本地走 push）")
     mode = pre.add_mutually_exclusive_group()
     mode.add_argument("--fast", action="store_true", help="快速档（只静态 + 护栏，无参即本档）")
@@ -548,6 +558,32 @@ def _cmd_coverage(args: argparse.Namespace) -> int:
         return 2
 
 
+def _cmd_coverage_changed(args: argparse.Namespace) -> int:
+    """执行改动行覆盖率门禁（清单从标准输入读）。
+
+    Args:
+        args: 解析结果。
+
+    Returns:
+        int: 退出码。
+    """
+    data_file = Path(args.data_file).resolve()
+    if args.clean:
+        coverage.cleanup(data_file)
+    files = tuple(line.strip() for line in sys.stdin.read().splitlines() if line.strip())
+    try:
+        return coverage.check_changed(
+            Path(args.root).resolve(),
+            data_file,
+            Path(args.out).resolve(),
+            files,
+            quiet=args.quiet,
+        )
+    except RuntimeError as exc:
+        error(f"[coverage-changed] {exc}")
+        return 2
+
+
 def _cmd_preflight(args: argparse.Namespace) -> int:
     """执行预检引擎（仅 CI 可手动调用；本地一律拒绝，改走 `engkit push`）。
 
@@ -798,6 +834,7 @@ _HANDLERS = {
     "run-selected": _cmd_run_selected,
     "run-changed": _cmd_run_changed,
     "coverage": _cmd_coverage,
+    "coverage-changed": _cmd_coverage_changed,
     "preflight": _cmd_preflight,
     "push": _cmd_push,
     "guard": _cmd_guard,

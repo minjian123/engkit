@@ -163,3 +163,80 @@ def test_check_low_threshold_fail(tmp_path: Path, capsys) -> None:
     _make_data(base, tmp_path, complete=False)
     assert coverage.check(base, tmp_path / "r.json", (), fail_under=99.9) == 1
     assert "未达标：" in capsys.readouterr().err
+
+
+def _git_repo(path: Path) -> Path:
+    """把临时目录初始化为 git 仓（提交身份直接写进仓配置）。
+
+    Args:
+        path: 仓库目录。
+
+    Returns:
+        Path: 仓库目录。
+    """
+    path.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "init", "-q"], cwd=path, check=True)
+    subprocess.run(["git", "config", "user.email", "t@example.com"], cwd=path, check=True)
+    subprocess.run(["git", "config", "user.name", "tester"], cwd=path, check=True)
+    return path
+
+
+def test_changed_lines_reads_staged_hunks(tmp_path: Path) -> None:
+    """暂存区改动行：修改与新增行被收集，删除行不参与。"""
+    repo = _git_repo(tmp_path / "repo")
+    module = repo / "a.py"
+    module.write_text("x = 1\ny = 2\nz = 3\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-qm", "init"], cwd=repo, check=True)
+    module.write_text("x = 1\ny = 9\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=repo, check=True)
+    assert coverage.changed_lines(repo, "a.py") == (2,)
+
+
+def test_statements_of_marks_executable_lines() -> None:
+    """语句集合 = executed ∪ missing；不可执行行天然不在集合里。"""
+    payload = {"files": {"a/src/pkg/x.py": {"executed_lines": [1, 2], "missing_lines": [5]}}}
+    assert coverage.statements_of(payload, "a/src/pkg/x.py") == ({1, 2, 5}, {5})
+    assert coverage.statements_of({"files": {}}, "x.py") is None
+    assert coverage.statements_of({"files": {"x.py": {}}}, "x.py") is None
+    assert coverage.statements_of({"files": {"x.py": {"executed_lines": [1]}}}, "x.py") is None
+
+
+def test_check_changed_passes_when_changed_lines_executed(tmp_path: Path, capsys) -> None:
+    """改动行已执行：通过。"""
+    repo = _git_repo(tmp_path / "ok")
+    data = repo / ".coverage"
+    _make_data(data, repo, complete=True)
+    module = repo / "sample.py"
+    subprocess.run(["git", "add", "."], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-qm", "base"], cwd=repo, check=True)
+    module.write_text("X = 2\nY = 2\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=repo, check=True)
+    assert coverage.check_changed(repo, data, repo / "r.json", ("sample.py",)) == 0
+    assert "改动行均已被执行" in capsys.readouterr().out
+
+
+def test_check_changed_flags_unexecuted_lines(tmp_path: Path, capsys) -> None:
+    """改动行未执行：失败并列出该文件。"""
+    repo = _git_repo(tmp_path / "bad")
+    data = repo / ".coverage"
+    module = repo / "sample.py"
+    module.write_text(_PARTIAL, encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-qm", "base"], cwd=repo, check=True)
+    _make_data(data, repo, complete=False)
+    module.write_text("X = 1\n\n\ndef unused():\n    return 4\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=repo, check=True)
+    assert coverage.check_changed(repo, data, repo / "r.json", ("sample.py",)) == 1
+    assert "sample.py" in capsys.readouterr().err
+
+
+def test_check_changed_skips_uncaptured_and_without_data(tmp_path: Path, capsys) -> None:
+    """未采集文件跳过并提示；完全无数据按未达标。"""
+    repo = _git_repo(tmp_path / "skip")
+    data = repo / ".coverage"
+    _make_data(data, repo, complete=True)
+    assert coverage.check_changed(repo, data, repo / "r.json", ("other.py",)) == 0
+    assert "跳过 1 个未采集文件" in capsys.readouterr().out
+    assert coverage.check_changed(repo, repo / "missing-data", repo / "r.json", ("x.py",)) == 2
+    assert "未采集到覆盖率数据" in capsys.readouterr().err

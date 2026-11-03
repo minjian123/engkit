@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import contextlib
 import json
+import re
+import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -16,6 +18,12 @@ from typing import Any
 
 SOURCE_MARKER = "src"
 """模块名归一的路径标记（`…/src/<包>/…` 之后的部分即模块路径）。"""
+
+_HUNK = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
+"""unified diff 的 hunk 头（取新文件起始行与行数）。"""
+
+_TEST_SEGMENTS = ("/tests/", "/test/")
+"""测试目录不参与改动行判定（它们本身不是被测对象）。"""
 
 
 @dataclass(frozen=True)
@@ -333,4 +341,129 @@ def check(
     if totals.percent + 1e-9 >= fail_under:
         return 0
     print(f"[coverage] 未达标：{totals.percent:.2f}% < {fail_under}%", file=sys.stderr)
+    return 1
+
+
+def changed_lines(root: Path, relative: str) -> tuple[int, ...]:
+    """取暂存区里某文件**新增 / 修改**的行号（删除行不参与）。
+
+    Args:
+        root: 仓库根（git 命令工作目录）。
+        relative: 仓根相对路径。
+
+    Returns:
+        tuple[int, ...]: 新文件行号（升序）。
+    """
+    completed = subprocess.run(
+        ["git", "diff", "--cached", "-U0", "--", relative],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    if completed.returncode != 0:
+        return ()
+    lines: set[int] = set()
+    for raw in completed.stdout.splitlines():
+        match = _HUNK.match(raw)
+        if match is None:
+            continue
+        start = int(match.group(1))
+        count = 1 if match.group(2) is None else int(match.group(2))
+        for offset in range(count):
+            lines.add(start + offset)
+    return tuple(sorted(lines))
+
+
+def statements_of(payload: Any, relative: str) -> tuple[set[int], set[int]] | None:
+    """从覆盖率报告里取某文件的可执行语句行与未执行行。
+
+    可执行行 = `executed_lines ∪ missing_lines`；改动行若两者都不是（注释 / 空行 / 文档串），
+    说明它根本不可执行，不参与判定。
+
+    Args:
+        payload: `export_json` 的报告内容。
+        relative: 仓根相对路径。
+
+    Returns:
+        tuple[set[int], set[int]] | None: （可执行行, 未执行行）；文件未被采集返回 None。
+    """
+    files = payload.get("files") if isinstance(payload, dict) else None
+    if not isinstance(files, dict):
+        return None
+    wanted = relative.replace("\\", "/")
+    for path, entry in files.items():
+        if not str(path).replace("\\", "/").endswith(wanted) or not isinstance(entry, dict):
+            continue
+        executed = entry.get("executed_lines")
+        missing = entry.get("missing_lines")
+        if not isinstance(executed, list) or not isinstance(missing, list):
+            return None
+        statements = {int(number) for number in [*executed, *missing]}
+        return statements, {int(number) for number in missing}
+    return None
+
+
+def check_changed(
+    root: Path,
+    data_file: Path,
+    out: Path,
+    files: tuple[str, ...],
+    *,
+    quiet: bool = False,
+) -> int:
+    """改动行覆盖率门禁：只要求「本次改动的可执行行」被本轮测试执行。
+
+    与模块级 `check` 的分工：`check` 要求整模块 100%（推送环 / CI 用），`check_changed`
+    只判 diff 触达的可执行行（提交环用）——改一行不必为整文件补齐用例。
+
+    Args:
+        root: 仓库根（git 命令工作目录）。
+        data_file: 覆盖率数据文件基址。
+        out: JSON 报告落点。
+        files: 改动文件（仓根相对）。
+        quiet: 是否抑制通过时的度量输出。
+
+    Returns:
+        int: 退出码（0 达标 / 1 存在未覆盖的改动行 / 2 未采集到数据）。
+    """
+    if combine(data_file) == 0:
+        print(f"[diff-coverage] 未采集到覆盖率数据（{data_file}）：不支持跳过，视为未达标", file=sys.stderr)
+        return 2
+    payload = export_json(data_file, out)
+    gaps: dict[str, tuple[int, ...]] = {}
+    checked = 0
+    skipped = 0
+    for relative in files:
+        if not relative.endswith(".py"):
+            continue
+        if any(segment in f"/{relative}" for segment in _TEST_SEGMENTS):
+            continue
+        probe = statements_of(payload, relative)
+        if probe is None:
+            skipped += 1
+            continue
+        statements, missing = probe
+        checked += 1
+        uncovered = tuple(
+            number for number in changed_lines(root, relative) if number in statements and number in missing
+        )
+        if uncovered:
+            gaps[relative] = uncovered
+    if skipped:
+        print(f"[diff-coverage] 跳过 {skipped} 个未采集文件（无同名测试，交推送环）")
+    if not checked:
+        if not quiet:
+            print("[diff-coverage] 无可判文件：本轮改动的源文件均未被覆盖率采集")
+        return 0
+    if not gaps:
+        if not quiet:
+            print(f"[diff-coverage] 通过：{checked} 个文件的改动行均已被执行")
+        return 0
+    print("[diff-coverage] 未通过：以下文件的改动行未被本轮测试执行", file=sys.stderr)
+    for relative, numbers in gaps.items():
+        shown = "、".join(str(number) for number in numbers[:20])
+        suffix = "" if len(numbers) <= 20 else f" …（共 {len(numbers)} 行）"
+        print(f"[diff-coverage]   {relative}: {shown}{suffix}", file=sys.stderr)
     return 1
