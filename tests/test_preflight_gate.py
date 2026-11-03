@@ -105,7 +105,7 @@ def test_gate_clean(git_repo: Path, cfg, monkeypatch: pytest.MonkeyPatch) -> Non
 
 
 def test_gate_rejects_dirty(git_repo: Path, cfg, monkeypatch: pytest.MonkeyPatch) -> None:
-    """脏工作树拒绝，提示指向开发环与推送入口。"""
+    """脏工作树拒绝，提示指向「提交即预检」与推送入口。"""
     _no_ci(monkeypatch)
     (git_repo / "new.txt").write_text("x", encoding="utf-8")
     decision = preflight_gate.evaluate(cfg)
@@ -114,7 +114,7 @@ def test_gate_rejects_dirty(git_repo: Path, cfg, monkeypatch: pytest.MonkeyPatch
     assert decision.reason == preflight_gate.REASON_DIRTY
     text = preflight_gate.guidance(decision)
     assert "推送的内部步骤" in text
-    assert "run-changed" in text
+    assert "改完直接提交" in text
     assert "engkit push" in text
 
 

@@ -4,7 +4,7 @@
 
 - **G1 自建库**：测试代码不得为“图省事”自建 SQLite（连接串字面量 / 直接构造引擎 /
   `tmp_path` 派生 `*.db`）；“建库即被测”的用例打 `@pytest.mark.own_db("理由")` 进白名单。
-- **G2 裸 int ID**：原生 SQL 的 ID 参数必须经 `bms_core.testing.sql_ids.sqlite_id()`；
+- **G2 裸 int ID**：原生 SQL 的 ID 参数必须经测试基座的 `sqlite_id()` 包装；
   绑定 int 常量即违规（SQLite 落 38 位补零 TEXT，裸 int 查不到）。
 - **G3 清理他人数据**：单库叠加下不得 `drop_all` / 无 `where` 的 `delete()`（白名单内的自建表除外）。
 
