@@ -37,6 +37,19 @@ _METRICS_RE = re.compile(r"\[test-selection\] picked=(\d+)/(\d+) degraded=(true|
 TIMEOUT_CODE = 124
 """单轮超时退出码（与既有口径一致）。"""
 
+DEFAULT_ARGV_BUDGET = 6000
+"""单条 pytest 命令的路径参数字符预算。
+
+Windows 命令行上限约 32767 字符：退化全量时把数百个测试路径拼进一条命令，会在启动子进程前
+直接失败（`WinError 206 文件名或扩展名太长`），整轮预检崩掉。取 6000 留出解释器、插件与转义余量。
+"""
+
+_PYTEST_TEST_GLOBS = ("test_*.py", "*_test.py")
+"""pytest 缺省 `python_files` 口径（目录聚合时用于核对目录内可收集文件）。"""
+
+_SKIP_SCAN_DIRS = frozenset({".venv", "venv", "node_modules", "__pycache__", ".git", ".cache", ".pytest_cache"})
+"""扫盘跳过的目录（依赖 / 缓存，与`norecursedirs`口径一致）。"""
+
 
 @dataclass
 class Budget:
@@ -426,6 +439,104 @@ def gate_command(cfg: Config, data_file: Path, report: Path, modules: list[str],
     return [*shlex.split(interpreter), "-c", script]
 
 
+def pack_paths(paths: list[str], budget: int = DEFAULT_ARGV_BUDGET) -> list[list[str]]:
+    """按字符预算把测试路径分批，保证单条命令不超命令行长度上限。
+
+    Args:
+        paths: 测试路径（相对 pytest 工作目录）。
+        budget: 单批字符预算（含分隔空格）。
+
+    Returns:
+        list[list[str]]: 分批结果（保持原顺序；`paths` 为空返回空列表）。
+    """
+    batches: list[list[str]] = []
+    current: list[str] = []
+    size = 0
+    for path in paths:
+        cost = len(path) + 1
+        if current and size + cost > budget:
+            batches.append(current)
+            current = []
+            size = 0
+        current.append(path)
+        size += cost
+    if current:
+        batches.append(current)
+    return batches
+
+
+def _ancestor_dirs(rel: str) -> list[str]:
+    """列出文件路径的全部祖先目录（不含文件名；从浅到深）。
+
+    Args:
+        rel: 相对路径（posix 分隔）。
+
+    Returns:
+        list[str]: 祖先目录。
+    """
+    parts = rel.split("/")[:-1]
+    return ["/".join(parts[: index + 1]) for index in range(len(parts))]
+
+
+def _scan_test_files(cwd: Path, directory: str) -> set[str]:
+    """按 pytest 缺省收集口径列出目录下的测试文件。
+
+    Args:
+        cwd: pytest 工作目录（路径基准）。
+        directory: 相对 `cwd` 的目录。
+
+    Returns:
+        set[str]: 相对 `cwd` 的测试文件路径；目录不存在返回空集。
+    """
+    root = cwd / directory
+    if not root.is_dir():
+        return set()
+    found: set[str] = set()
+    for path in root.rglob("*.py"):
+        rel = path.relative_to(cwd).as_posix()
+        if any(part in _SKIP_SCAN_DIRS for part in rel.split("/")):
+            continue
+        if not any(path.match(pattern) for pattern in _PYTEST_TEST_GLOBS):
+            continue
+        found.add(rel)
+    return found
+
+
+def collapse_to_dirs(cwd: Path, paths: list[str]) -> list[str]:
+    """把选中测试文件折叠为目录目标，缩短命令行。
+
+    只做**保守**折叠：目录下按 pytest 缺省口径扫到的测试文件必须全部在选中集合内，且至少两个
+    （否则没有收益）——宁可不折叠，也不能让目录参数多收集用例。
+
+    Args:
+        cwd: pytest 工作目录（路径基准）。
+        paths: 选中测试文件（相对 `cwd`）。
+
+    Returns:
+        list[str]: 折叠后的目标（目录 + 未覆盖的文件；顺序稳定）。
+    """
+    if not paths:
+        return []
+    selected = set(paths)
+    candidates = sorted(
+        {parent for path in paths for parent in _ancestor_dirs(path)},
+        key=lambda item: (item.count("/"), item),
+    )
+    collapsed: list[str] = []
+    covered: set[str] = set()
+    for directory in candidates:
+        if any(directory.startswith(f"{parent}/") for parent in collapsed):
+            continue
+        found = _scan_test_files(cwd, directory)
+        if len(found) < 2 or not found <= selected:
+            continue
+        collapsed.append(directory)
+        covered |= found
+    if not collapsed:
+        return list(paths)
+    return [*collapsed, *(path for path in paths if path not in covered)]
+
+
 def run_pytest_once(
     argv: list[str], cwd: Path, env: dict[str, str] | None, timeout: float | None
 ) -> tuple[int, list[str]]:
@@ -623,23 +734,30 @@ def run_selected(
         rounds += 1
         if cov_enabled:
             coverage.cleanup(data_file)
-        argv = [*shlex.split(command_prefix), "-q", *test_paths]
-        if cov_enabled and cfg.coverage.plugin:
-            argv.extend(["-p", cfg.coverage.plugin])
-        argv.extend(parallel)
-        argv.extend(pytest_args)
-        out(f"\n[test-selection] 第 {rounds} 轮：{len(test_paths)} 个测试文件")
-        out(f"  $ {' '.join(argv)}")
-        try:
-            code, _lines = run_pytest_once(argv, workdir, env, limit)
-        except subprocess.TimeoutExpired:
-            out(f"[test-selection] 单轮超时（{limit:.0f}s）⇒ 中止；长命令交 CI")
-            print_metrics(len(test_paths), result.total, degraded, rounds, len(cov_modules))
-            return TIMEOUT_CODE
+        targets = collapse_to_dirs(workdir, test_paths)
+        batches = pack_paths(targets, cfg.pytest.argv_budget)
+        out(f"\n[test-selection] 第 {rounds} 轮：{len(test_paths)} 个测试文件（{len(batches)} 批）")
+        if len(targets) != len(test_paths):
+            out(f"[test-selection] 目录聚合：{len(test_paths)} 个文件 → {len(targets)} 个目标")
+        for index, batch in enumerate(batches, start=1):
+            argv = [*shlex.split(command_prefix), "-q", *batch]
+            if cov_enabled and cfg.coverage.plugin:
+                argv.extend(["-p", cfg.coverage.plugin])
+            argv.extend(parallel)
+            argv.extend(pytest_args)
+            if len(batches) > 1:
+                out(f"[test-selection] 第 {index}/{len(batches)} 批：{len(batch)} 个目标")
+            out(f"  $ {' '.join(argv)}")
+            try:
+                code, _lines = run_pytest_once(argv, workdir, env, limit)
+            except subprocess.TimeoutExpired:
+                out(f"[test-selection] 单批超时（{limit:.0f}s）⇒ 中止；长命令交 CI")
+                print_metrics(len(test_paths), result.total, degraded, rounds, len(cov_modules))
+                return TIMEOUT_CODE
 
-        if code != 0:
-            print_metrics(len(test_paths), result.total, degraded, rounds, len(cov_modules))
-            return code
+            if code != 0:
+                print_metrics(len(test_paths), result.total, degraded, rounds, len(cov_modules))
+                return code
         if not cov_enabled:
             print_metrics(len(test_paths), result.total, degraded, rounds, 0)
             return 0

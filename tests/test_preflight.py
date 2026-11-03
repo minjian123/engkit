@@ -588,3 +588,80 @@ def test_tee(capsys) -> None:
     tee.flush()
     assert sink == ["a"]
     assert "a" in capsys.readouterr().out
+
+
+def test_pack_paths_by_budget() -> None:
+    """按字符预算分批：保序、不丢项、空清单返回空。"""
+    paths = ["a.py", "bb.py", "ccc.py"]
+    assert preflight.pack_paths(paths, 100) == [paths]
+    assert preflight.pack_paths(paths, 6) == [["a.py"], ["bb.py"], ["ccc.py"]]
+    assert preflight.pack_paths([], 6) == []
+
+
+def test_collapse_to_dirs_folds_complete_directory(tmp_path: Path) -> None:
+    """目录内测试文件全被选中 ⇒ 折叠为上层的目录目标。"""
+    (tmp_path / "tests/a").mkdir(parents=True)
+    (tmp_path / "tests/a/test_one.py").write_text("", encoding="utf-8")
+    (tmp_path / "tests/a/test_two.py").write_text("", encoding="utf-8")
+    paths = ["tests/a/test_one.py", "tests/a/test_two.py"]
+    assert preflight.collapse_to_dirs(tmp_path, paths) == ["tests"]
+
+
+def test_collapse_to_dirs_keeps_partial_directory(tmp_path: Path) -> None:
+    """目录内有未选中的测试文件 ⇒ 不折叠（宁可多写路径，不多收用例）。"""
+    (tmp_path / "tests/a").mkdir(parents=True)
+    for name in ("test_one.py", "test_two.py", "test_extra.py"):
+        (tmp_path / "tests/a" / name).write_text("", encoding="utf-8")
+    paths = ["tests/a/test_one.py", "tests/a/test_two.py"]
+    assert preflight.collapse_to_dirs(tmp_path, paths) == paths
+
+
+def test_collapse_to_dirs_single_file_missing_dir_and_root(tmp_path: Path) -> None:
+    """单文件 / 目录不存在 / 顶层文件 / 空清单都不折叠。"""
+    (tmp_path / "tests/a").mkdir(parents=True)
+    (tmp_path / "tests/a/test_only.py").write_text("", encoding="utf-8")
+    assert preflight.collapse_to_dirs(tmp_path, ["tests/a/test_only.py"]) == ["tests/a/test_only.py"]
+    ghost = ["ghost/test_x.py", "ghost/test_y.py"]
+    assert preflight.collapse_to_dirs(tmp_path, ghost) == ghost
+    assert preflight.collapse_to_dirs(tmp_path, ["top.py"]) == ["top.py"]
+    assert preflight.collapse_to_dirs(tmp_path, []) == []
+
+
+def test_collapse_to_dirs_skips_dependency_and_non_test_files(tmp_path: Path) -> None:
+    """依赖目录与非测试命名文件不计入目录内集合（否则永远折叠不成）。"""
+    (tmp_path / "tests/a").mkdir(parents=True)
+    (tmp_path / "tests/.venv/x").mkdir(parents=True)
+    (tmp_path / "tests/a/test_one.py").write_text("", encoding="utf-8")
+    (tmp_path / "tests/a/test_two.py").write_text("", encoding="utf-8")
+    (tmp_path / "tests/a/helper.py").write_text("", encoding="utf-8")
+    (tmp_path / "tests/.venv/x/test_hidden.py").write_text("", encoding="utf-8")
+    paths = ["tests/a/test_one.py", "tests/a/test_two.py"]
+    assert preflight.collapse_to_dirs(tmp_path, paths) == ["tests"]
+
+
+def test_run_selected_splits_long_argv(cfg, monkeypatch) -> None:
+    """路径超预算 ⇒ 同一轮拆成多条命令逐批执行（结果与单条命令等价）。"""
+    calls: list[list[str]] = []
+
+    def fake_run(argv, cwd, env, timeout):
+        calls.append(argv)
+        return 0, []
+
+    monkeypatch.setattr(preflight, "run_pytest_once", fake_run)
+    monkeypatch.setattr(preflight, "collapse_to_dirs", lambda cwd, paths: list(paths))
+    tiny = dataclasses.replace(cfg, pytest=dataclasses.replace(cfg.pytest, argv_budget=20))
+    code = preflight.run_selected(
+        tiny, changed=["backend/libs/pkg_a/src/pkg_a/util.py"], pytest_cmd=PASS_CMD, cov=False
+    )
+    assert code == 0
+    assert len(calls) > 1
+    assert all("-q" in argv for argv in calls)
+
+
+def test_run_selected_logs_dir_collapse(cfg, monkeypatch, capsys) -> None:
+    """折叠生效时打印「目录聚合」说明（便于复盘命令行为何变短）。"""
+    monkeypatch.setattr(preflight, "run_pytest_once", lambda *args: (0, []))
+    monkeypatch.setattr(preflight, "collapse_to_dirs", lambda cwd, paths: ["libs"])
+    code = preflight.run_selected(cfg, changed=["backend/libs/pkg_a/src/pkg_a/util.py"], pytest_cmd=PASS_CMD, cov=False)
+    assert code == 0
+    assert "目录聚合" in capsys.readouterr().out
