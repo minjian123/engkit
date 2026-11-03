@@ -230,7 +230,7 @@ def heavy_guidance(kind: str) -> str:
     """
     return (
         f"[重命令守卫] 拒绝执行：本地非 CI 环境跑重命令（{kind}）。\n"
-        "  开发期请只跑改动相关：`engkit run-changed`（或各仓 `测试改动内容.sh`）。\n"
+        "  改完直接提交：提交前预检按改动面跑全（静态 + 护栏 + 定向用例 + 改动行覆盖率），一次拿到完整失败清单。\n"
         "  单文件 / 单节点调用（秒级）不受此限；窄多目录与全仓扫描请走推送预检或 CI。\n"
         f"  确需裸跑请显式声明：{ALLOW_ENV}=1 <原命令>"
     )
@@ -312,8 +312,7 @@ def full_test_guidance() -> str:
     """
     return (
         "[全量测试守卫] 拒绝执行：开发期间不允许跑全量测试（本地非 CI）。\n"
-        "  开发中改完即测请用开发环（按变更自动推导）：\n"
-        "    engkit run-changed\n"
+        "  改完直接提交：提交前预检按改动面跑全（静态 + 护栏 + 定向用例 + 改动行覆盖率），一次拿到完整失败清单：\n"
         "  调试单个用例 / 窄目录（秒级）：\n"
         "    pytest tests/test_a.py\n"
         "    pytest tests/test_a.py::test_x\n"

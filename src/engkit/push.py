@@ -127,7 +127,8 @@ def run_push(
         print(
             f"[push] 拒绝执行：工作树有 {len(entries)} 处未提交改动，推送前须先提交。\n"
             f"  未提交条目：{sample}{more}\n"
-            "  开发中改完即测请用开发环（engkit run-changed）；准备推送时先提交，再跑 engkit push。"
+            "  改完直接提交：提交前预检按改动面跑全（静态 + 护栏 + 定向用例 + 改动行覆盖率），\n"
+            "  一次拿到完整失败清单；准备推送时先提交，再跑 engkit push。"
         )
         return 1
     commits, files, known = gitutil.ahead(root, target_remote, target_branch)

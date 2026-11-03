@@ -488,7 +488,7 @@ def _cmd_run_selected(args: argparse.Namespace) -> int:
     cfg = _load(args)
     if args.force_full and not guard.is_ci():
         error("[test-selection] 拒绝执行：本地不允许强制全量（全量测试只由 CI 执行）。")
-        error("  开发中改完即测请用：engkit run-changed")
+        error("  改完直接提交：提交前预检按改动面跑全（静态 + 护栏 + 定向用例 + 改动行覆盖率），一次拿到完整失败清单")
         return 2
     return preflight.run_selected(
         cfg,

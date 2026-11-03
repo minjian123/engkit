@@ -155,12 +155,12 @@ def test_full_test_should_block(monkeypatch, tmp_path: Path) -> None:
 
 
 def test_guidance_texts() -> None:
-    """提示文案包含包装命令与定向指引。"""
+    """提示文案指向「提交前预检跑全」与逃生开关 / CI 口径。"""
     heavy = guard.heavy_guidance("pytest")
-    assert "engkit run-changed" in heavy
+    assert "提交前预检" in heavy
     assert guard.ALLOW_ENV in heavy
     full = guard.full_test_guidance()
-    assert "engkit run-changed" in full
+    assert "提交前预检" in full
     assert "CI" in full
 
 

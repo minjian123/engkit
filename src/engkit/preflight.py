@@ -549,7 +549,7 @@ def run_selected(
     """
     if force_full and not allow_full:
         print("[test-selection] 拒绝执行：本地不允许强制全量（全量测试只由 CI 执行）。", file=sys.stderr)
-        print("  开发中改完即测请用：engkit run-changed", file=sys.stderr)
+        print("  改完直接提交：提交前预检按改动面跑全，一次拿到完整失败清单", file=sys.stderr)
         return 2
     try:
         parallel = parallel_args(cfg, jobs)
@@ -873,7 +873,7 @@ def run_preflight(
             "[engkit] 预检是**推送的内部步骤**，本地不再单独执行。\n"
             "  准备推送：engkit push（预检通过后自动推送）\n"
             "  只验证不推送：engkit push --check\n"
-            "  开发中改完即测请用开发环：engkit run-changed\n"
+            "  改完直接提交：提交前预检按改动面跑全（静态 + 护栏 + 定向用例 + 改动行覆盖率），一次拿到完整失败清单\n"
             "  CI 环境不受此限制。",
             file=sys.stderr,
         )

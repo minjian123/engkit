@@ -79,8 +79,7 @@ def guidance(decision: Decision) -> str:
         f"[预检闸门] 拒绝执行：工作树有 {len(decision.entries)} 处未提交改动。"
         "预检是**推送的内部步骤**，不承担开发中的反馈环。\n"
         f"  未提交条目：{sample}{more}\n"
-        "  开发中改完即测请用开发环（只跑改动相关，秒级到十几秒）：\n"
-        "    engkit run-changed\n"
+        "  改完直接提交：提交前预检按改动面跑全（静态 + 护栏 + 定向用例 + 改动行覆盖率），一次拿到完整失败清单：\n"
         "  准备推送时：先提交，再跑 `engkit push`（预检通过即自动推送）。"
     )
 
