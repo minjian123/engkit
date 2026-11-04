@@ -48,15 +48,28 @@ def test_describe_jobs() -> None:
 
 def test_parallel_args_with_xdist(monkeypatch, cfg) -> None:
     """装了 pytest-xdist 时按档位给出并行参数。"""
-    monkeypatch.setattr(preflight, "xdist_available", lambda config: True)
+    monkeypatch.setattr(preflight, "xdist_available", lambda config, cwd: True)
     assert preflight.parallel_args(cfg, "auto") == ("-n", "auto")
     assert preflight.parallel_args(cfg, "4") == ("-n", "4")
     assert preflight.parallel_args(cfg, "off") == ()
 
 
+def test_parallel_args_passes_pytest_workdir(monkeypatch, cfg, tmp_path) -> None:
+    """探测按 pytest 实际工作目录执行（避免仓根 `uv run` 误判未装 xdist）。"""
+    seen: list[Path] = []
+
+    def fake_probe(config, cwd):
+        seen.append(cwd)
+        return True
+
+    monkeypatch.setattr(preflight, "xdist_available", fake_probe)
+    assert preflight.parallel_args(cfg, "auto", tmp_path) == ("-n", "auto")
+    assert seen == [tmp_path]
+
+
 def test_parallel_args_degrades_without_xdist(monkeypatch, capsys, cfg) -> None:
     """未装 pytest-xdist 时显式降级为串行（打印原因，不静默失败）。"""
-    monkeypatch.setattr(preflight, "xdist_available", lambda config: False)
+    monkeypatch.setattr(preflight, "xdist_available", lambda config, cwd: False)
     assert preflight.parallel_args(cfg, "auto") == ()
     assert "并行降级" in capsys.readouterr().out
 
