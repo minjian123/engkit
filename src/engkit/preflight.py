@@ -506,15 +506,23 @@ def _scan_test_files(cwd: Path, directory: str) -> set[str]:
     return found
 
 
-def collapse_to_dirs(cwd: Path, paths: list[str]) -> list[str]:
+def collapse_to_dirs(cwd: Path, paths: list[str], *, threshold: int | None = None) -> list[str]:
     """把选中测试文件折叠为目录目标，缩短命令行。
 
     只做**保守**折叠：目录下按 pytest 缺省口径扫到的测试文件必须全部在选中集合内，且至少两个
     （否则没有收益）——宁可不折叠，也不能让目录参数多收集用例。
 
+    另有一条**与全量守卫一致**的约束：折叠后的目标若会被守卫判成「全量」（目录内测试文件数超过
+    `[guard].dir_test_threshold`），就不折叠，保持显式文件列表分批跑。
+
+    > 为什么必须这样：选测命中率到 100% 时（改动落在被几乎所有用例 import 的枢纽模块），折叠会把
+    > 一串合法文件收敛成 `pytest <服务目录>`，守卫按目录文件数立刻拒绝——**两套判据互相打架**，
+    > 提交环永远跑不起来。这里让折叠尊重守卫口径，选测仍是定向运行，只是分批提交文件路径。
+
     Args:
         cwd: pytest 工作目录（路径基准）。
         paths: 选中测试文件（相对 `cwd`）。
+        threshold: 目录判重阈值（`None` 表示不按守卫口径限制，仅用于历史调用）。
 
     Returns:
         list[str]: 折叠后的目标（目录 + 未覆盖的文件；顺序稳定）。
@@ -533,6 +541,8 @@ def collapse_to_dirs(cwd: Path, paths: list[str]) -> list[str]:
             continue
         found = _scan_test_files(cwd, directory)
         if len(found) < 2 or not found <= selected:
+            continue
+        if threshold is not None and len(found) > threshold:
             continue
         collapsed.append(directory)
         covered |= found
@@ -738,7 +748,7 @@ def run_selected(
         rounds += 1
         if cov_enabled:
             coverage.cleanup(data_file)
-        targets = collapse_to_dirs(workdir, test_paths)
+        targets = collapse_to_dirs(workdir, test_paths, threshold=cfg.guard.dir_test_threshold)
         batches = pack_paths(targets, cfg.pytest.argv_budget)
         out(f"\n[test-selection] 第 {rounds} 轮：{len(test_paths)} 个测试文件（{len(batches)} 批）")
         if len(targets) != len(test_paths):

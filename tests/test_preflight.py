@@ -620,6 +620,19 @@ def test_collapse_to_dirs_folds_complete_directory(tmp_path: Path) -> None:
     assert preflight.collapse_to_dirs(tmp_path, paths) == ["tests"]
 
 
+def test_collapse_to_dirs_skips_target_that_guard_would_block(tmp_path: Path) -> None:
+    """折叠目标会被全量守卫判成「全量」时不折叠（选测=100% 时提交环仍能跑起来）。"""
+    (tmp_path / "services/msg/tests").mkdir(parents=True)
+    paths: list[str] = []
+    for index in range(3):
+        name = f"test_{index}.py"
+        (tmp_path / "services/msg/tests" / name).write_text("", encoding="utf-8")
+        paths.append(f"services/msg/tests/{name}")
+
+    assert preflight.collapse_to_dirs(tmp_path, paths, threshold=2) == paths
+    assert preflight.collapse_to_dirs(tmp_path, paths, threshold=3) == ["services"]
+
+
 def test_collapse_to_dirs_keeps_partial_directory(tmp_path: Path) -> None:
     """目录内有未选中的测试文件 ⇒ 不折叠（宁可多写路径，不多收用例）。"""
     (tmp_path / "tests/a").mkdir(parents=True)
@@ -661,7 +674,7 @@ def test_run_selected_splits_long_argv(cfg, monkeypatch) -> None:
         return 0, []
 
     monkeypatch.setattr(preflight, "run_pytest_once", fake_run)
-    monkeypatch.setattr(preflight, "collapse_to_dirs", lambda cwd, paths: list(paths))
+    monkeypatch.setattr(preflight, "collapse_to_dirs", lambda cwd, paths, *, threshold=None: list(paths))
     tiny = dataclasses.replace(cfg, pytest=dataclasses.replace(cfg.pytest, argv_budget=20))
     code = preflight.run_selected(
         tiny, changed=["backend/libs/pkg_a/src/pkg_a/util.py"], pytest_cmd=PASS_CMD, cov=False
@@ -674,7 +687,7 @@ def test_run_selected_splits_long_argv(cfg, monkeypatch) -> None:
 def test_run_selected_logs_dir_collapse(cfg, monkeypatch, capsys) -> None:
     """折叠生效时打印「目录聚合」说明（便于复盘命令行为何变短）。"""
     monkeypatch.setattr(preflight, "run_pytest_once", lambda *args: (0, []))
-    monkeypatch.setattr(preflight, "collapse_to_dirs", lambda cwd, paths: ["libs"])
+    monkeypatch.setattr(preflight, "collapse_to_dirs", lambda cwd, paths, *, threshold=None: ["libs"])
     code = preflight.run_selected(cfg, changed=["backend/libs/pkg_a/src/pkg_a/util.py"], pytest_cmd=PASS_CMD, cov=False)
     assert code == 0
     assert "目录聚合" in capsys.readouterr().out
