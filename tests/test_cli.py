@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 from pathlib import Path
 
 import pytest
@@ -329,3 +330,56 @@ def test_docs_scope_files_from(build_repo, capsys) -> None:
     listed.write_text("README.md\n", encoding="utf-8")
     assert cli.main(["docs-scope", "--root", str(root), "--files-from", str(listed)]) == 0
     assert cli.main(["docs-scope", "--root", str(root), "--files-from", str(root / "missing.txt")]) == 2
+
+
+def test_coverage_changed_cli(repo: Path, monkeypatch, capsys) -> None:
+    """`coverage-changed` 分派：清单从标准输入读、`--clean` 先清旧数据。"""
+    seen: dict[str, object] = {}
+    cleaned: list[Path] = []
+
+    def fake_check_changed(root, data_file, out, files, *, quiet=False):
+        seen.update(root=root, data_file=data_file, out=out, files=files, quiet=quiet)
+        return 0
+
+    monkeypatch.setattr(cli.coverage, "check_changed", fake_check_changed)
+    monkeypatch.setattr(cli.coverage, "cleanup", cleaned.append)
+    monkeypatch.setattr("sys.stdin", io.StringIO("a.py\n\n b.py \n"))
+    argv = ["coverage-changed", "--root", str(repo), "--data-file", "d", "--out", "o", "--clean"]
+    assert cli.main(argv) == 0
+    assert seen["files"] == ("a.py", "b.py")
+    assert seen["quiet"] is False
+    assert cleaned
+
+
+def test_coverage_changed_cli_reports_runtime_error(repo: Path, monkeypatch, capsys) -> None:
+    """判定抛 `RuntimeError`（缺 coverage 等）时退 2 并给出原因。"""
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("缺少 coverage")
+
+    monkeypatch.setattr(cli.coverage, "check_changed", boom)
+    monkeypatch.setattr("sys.stdin", io.StringIO("a.py\n"))
+    assert cli.main(["coverage-changed", "--root", str(repo), "--data-file", "d", "--out", "o"]) == 2
+    assert "缺少 coverage" in capsys.readouterr().err
+
+
+def test_base_snowflake_and_test_db_isolation_dispatch(repo: Path, monkeypatch) -> None:
+    """`base` 的 `snowflake-ids` / `test-db-isolation` 分派到对应校验器（参数透传）。"""
+    from engkit.base import snowflake_ids, test_db_isolation
+
+    seen: dict[str, object] = {}
+    monkeypatch.setattr(snowflake_ids, "run", lambda cfg, **kw: seen.update(snowflake=kw) or 0)
+    monkeypatch.setattr(test_db_isolation, "run", lambda cfg, **kw: seen.update(db=kw) or 0)
+    assert cli.main(["base", "snowflake-ids", "--root", str(repo), "--self-test"]) == 0
+    assert cli.main(["base", "test-db-isolation", "--root", str(repo), "--self-test", "--list-own-db"]) == 0
+    assert seen["snowflake"] == {"as_self_test": True, "files_from": ""}
+    assert seen["db"] == {"as_self_test": True, "files_from": "", "list_own_db": True}
+
+
+def test_package_version_lazy_and_unknown_attribute() -> None:
+    """包顶层按需暴露 `VERSION`（不在导入期拉入 cli），未知属性抛 `AttributeError`。"""
+    import engkit
+
+    assert engkit.VERSION == cli.VERSION
+    with pytest.raises(AttributeError):
+        _ = engkit.not_exist

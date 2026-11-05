@@ -73,6 +73,10 @@ markers = [
 [tool.coverage.run]
 branch = true
 source = ["engkit"]
+# 引导模块不参与行覆盖率门禁：它们在**采集启动前**执行（pytest 解析 `-p` 时导入插件 →
+# 连带执行 `engkit/__init__`），模块级 import / def 行天然无法被自采；函数逻辑仍由
+# `tests/test_coverage_plugin.py`（插件钩子与配置读取）与 `tests/test_cli.py`（VERSION 惰性导出）保障。
+omit = ["src/engkit/__init__.py", "src/engkit/coverage_plugin.py"]
 # 采集数据落点：仓内缓存目录（`.cache/` 已忽略），不落仓库根（2026-10-26 拍板）
 # 与 engkit.toml 的 `[coverage].data_file` 同口径：前者管裸跑 `pytest --cov`（pytest-cov 只读本文件），
 # 后者管经 engkit 包装的入口（`engkit coverage` / `run-selected`）。

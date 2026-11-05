@@ -663,6 +663,10 @@ def test_backend_base_incremental_scopes_to_listed_files(tmp_path: Path) -> None
     assert "重复" in problems
     assert "应声明 branch_labels" not in problems
 
+    # 缺 revision 的文件**不在改动范围**（scope 非 None 且不含它）时不报该问题
+    outcome, _ = backend_base.collect(cfg, cfg.backend_base_rules, {"versions/platform/tenant/0002_b.py"})
+    assert "缺少 revision 定义" not in "\n".join(outcome.problems)
+
     # 迁移链全量仍校验单 head（增量下不判）
     assert backend_base.run(cfg, as_self_test=False, update_baseline=False) == 1
 
