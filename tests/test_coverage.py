@@ -42,13 +42,36 @@ def _make_data(data_file: Path, tmp_path: Path, *, complete: bool = True, suffix
 
 
 def test_data_files_and_cleanup(tmp_path: Path) -> None:
-    """采集文件枚举与清理（含并行进程后缀）。"""
+    """采集文件枚举与清理（含并行进程后缀；同目录报告残留不算分片）。"""
     base = tmp_path / ".coverage"
     _make_data(base, tmp_path)
     _make_data(base, tmp_path, suffix="123")
+    legacy = tmp_path / ".coverage.json"
+    legacy.write_text("{}", encoding="utf-8")
     assert len(coverage.data_files(base)) == 2
     coverage.cleanup(base)
     assert coverage.data_files(base) == ()
+    assert not legacy.exists()
+
+
+def test_data_files_ignores_non_numeric_siblings(tmp_path: Path) -> None:
+    """非纯数字后缀 / 目录 / 非 ASCII 数字后缀都不算采集分片。"""
+    base = tmp_path / ".coverage"
+    backup = tmp_path / ".coverage.backup"
+    backup.write_text("", encoding="utf-8")
+    (tmp_path / ".coverage.777").mkdir()
+    (tmp_path / ".coverage.²").write_text("", encoding="utf-8")
+    assert coverage.data_files(base) == ()
+    coverage.cleanup(base)
+    assert backup.exists()
+
+
+def test_report_path_isolated_from_shards(tmp_path: Path) -> None:
+    """报告落在 `report.json`：不进入 `<data-file>.*` 分片命名空间。"""
+    base = tmp_path / "cache" / ".coverage"
+    report = coverage.report_path(base)
+    assert report == tmp_path / "cache" / "report.json"
+    assert not report.name.startswith(f"{base.name}.")
 
 
 def test_combine_and_export(tmp_path: Path) -> None:

@@ -665,7 +665,7 @@ def run_selected(
         pytest_cmd: 执行器前缀（缺省取配置）。
         pytest_cwd: 工作目录（相对仓根；缺省取配置）。
         pytest_args: 透传 pytest 参数。
-        report_path: 覆盖率报告落点（相对仓根；缺省 `<数据文件>.json`）。
+        report_path: 覆盖率报告落点（相对仓根；缺省与数据文件同目录的 `report.json`）。
         depth: 依赖深度（空串取配置；预检固定传 `closure`）。
         allow_full: 是否允许退化 / 强制全量（仅推送入口与 CI 传 True；开发环恒 False）。
 
@@ -729,7 +729,7 @@ def run_selected(
     cov_modules = list(result.cov_modules)
     cov_enabled = cov and bool(cov_modules)
     data_file = (cfg.root / cfg.coverage.data_file).resolve()
-    report = (cfg.root / (report_path or f"{cfg.coverage.data_file}.json")).resolve()
+    report = (cfg.root / report_path).resolve() if report_path else coverage.report_path(data_file)
     env = _coverage_env(cfg, cov_modules, workdir) if cov_enabled else dict(os.environ)
     if allow_full:
         # 内部标记：推送入口 / CI 授权本次跑全量（开发环不设，pytest 守卫据此拦截）
@@ -892,7 +892,7 @@ def run_full_tests(cfg: Config, budget: Budget, failures: list[str], *, jobs: st
     if no_cov:
         return
     data_file = (cfg.root / cfg.coverage.data_file).resolve()
-    report = (cfg.root / f"{cfg.coverage.data_file}.json").resolve()
+    report = coverage.report_path(data_file)
     execute(
         "覆盖率：全量门禁（行 + 分支）",
         gate_command(cfg, data_file, report, [], cfg.coverage.fail_under),

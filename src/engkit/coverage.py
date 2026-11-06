@@ -25,6 +25,15 @@ _HUNK = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
 _TEST_SEGMENTS = ("/tests/", "/test/")
 """测试目录不参与改动行判定（它们本身不是被测对象）。"""
 
+REPORT_NAME = "report.json"
+"""门禁报告落点名（与数据文件同目录）。
+
+**不得**取 `<data-file>.<后缀>` 形态：`coverage` 库 `combine()` 会把数据文件同目录下
+`<data-file>.*` 的文件都当作待合并分片，报告落在该命名空间会触发
+`CoverageWarning: Couldn't use data file … file is not a database`，并在「只剩报告」时
+被误判成「已采集到数据」。
+"""
+
 
 @dataclass(frozen=True)
 class ModuleGap:
@@ -68,25 +77,50 @@ class Totals:
 
 
 def data_files(data_file: Path) -> tuple[Path, ...]:
-    """列出待合并的采集文件（`<data-file>` 与 `<data-file>.<pid>`）。
+    """列出待合并的采集文件（`<data-file>` 与 `<data-file>.<pid>` 分片）。
+
+    只认**纯数字后缀**的分片（采集插件按进程号落盘），同目录的其它同名文件
+    （如门禁报告 `report.json` 的历史命名 `<data-file>.json`）不参与合并。
 
     Args:
         data_file: 数据文件基址。
 
     Returns:
-        tuple[Path, ...]: 存在的采集文件（按名称排序）。
+        tuple[Path, ...]: 存在的采集文件（基址在前，分片按名称排序）。
     """
-    candidates = [data_file, *sorted(data_file.parent.glob(f"{data_file.name}.*"))]
-    return tuple(path for path in candidates if path.is_file())
+    prefix = f"{data_file.name}."
+    shards = tuple(
+        path
+        for path in sorted(data_file.parent.glob(f"{data_file.name}.*"))
+        if path.is_file() and (suffix := path.name.removeprefix(prefix)).isascii() and suffix.isdigit()
+    )
+    base = (data_file,) if data_file.is_file() else ()
+    return (*base, *shards)
+
+
+def report_path(data_file: Path) -> Path:
+    """门禁报告的落点（与数据文件同目录，且不落入分片通配命名空间）。
+
+    Args:
+        data_file: 数据文件基址。
+
+    Returns:
+        Path: 报告文件路径。
+    """
+    return data_file.parent / REPORT_NAME
 
 
 def cleanup(data_file: Path) -> None:
     """清理上一轮的采集文件。
 
+    同时删除历史命名 `<data-file>.json` 的报告残留：该名字落在分片通配命名空间内，
+    留着会让 `coverage` 库合并时报警。
+
     Args:
         data_file: 数据文件基址。
     """
-    for path in data_files(data_file):
+    legacy = data_file.parent / f"{data_file.name}.json"
+    for path in (*data_files(data_file), legacy):
         with contextlib.suppress(OSError):
             path.unlink()
 
