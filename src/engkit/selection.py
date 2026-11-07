@@ -72,6 +72,7 @@ class Selection:
         total: 全部工程测试文件总数。
         projects: 逐工程度量。
         notes: 逐条说明。
+        ci_offload: 明确交 CI 全量回归的条目（不允许本地退化全量时登记，不静默跳过）。
     """
 
     test_paths: tuple[str, ...] = ()
@@ -82,6 +83,7 @@ class Selection:
     total: int = 0
     projects: tuple[ProjectMetrics, ...] = ()
     notes: tuple[str, ...] = ()
+    ci_offload: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -754,8 +756,8 @@ def build_selection(
         base_ratio: 基础模块占比阈值（缺省取配置）。
         force_full: 强制退化全量。
         depth: 依赖深度（`closure` 传递闭包 / `direct` 直接依赖；空串取配置）。
-        allow_degrade: 是否允许退化为全量（开发环传 False：全局变更只跑直接相关用例，
-            全量交推送入口 / CI）。
+        allow_degrade: 是否允许退化为全量（False = 分层归位：本地只跑可推导影响面，
+            本会退化全量的超出部分写入 `Selection.ci_offload` 显式交 CI，不静默跳过）。
 
     Returns:
         Selection: 选测结果。
@@ -784,6 +786,7 @@ def build_selection(
         reasons.append("变更基准不可解析 ⇒ 强制退化全量")
 
     selected_by_project: dict[str, set[str]] = {}
+    offload_hints: dict[str, list[str]] = {}
     global_modules = (
         {
             module
@@ -809,7 +812,8 @@ def build_selection(
                     reasons.append("全局配置 / 迁移 / 部署变更 ⇒ 全量")
         else:
             if global_change:
-                notes.append("全局配置 / 迁移 / 部署变更：开发环只跑直接相关用例（全量交推送入口 / CI）")
+                offload_hints.setdefault(project.name, []).append("全局配置 / 迁移 / 部署变更")
+                notes.append("全局配置 / 迁移 / 部署变更：本地只跑可推导影响面，超出部分交 CI 全量回归")
             for rel in changed_set:
                 selected.update(_isomorphic_candidates(backend, rel, project, test_prefix))
             if modules:
@@ -821,20 +825,30 @@ def build_selection(
             project_degraded = False
             if modules and not selected:
                 if mode == "direct" or not allow_degrade:
-                    notes.append(f"{project.name}：变更模块无测试命中 ⇒ 本次跳过该工程（缺测交推送前预检）")
+                    notes.append(f"{project.name}：变更模块无测试命中 ⇒ 本次跳过该工程（缺测交 CI 全量回归）")
+                    if not allow_degrade:
+                        offload_hints.setdefault(project.name, []).append("变更模块无测试引用者")
                 else:
                     project_degraded = True
                     notes.append(f"{project.name}：变更模块无测试引用者 ⇒ 退化工程级全量")
-            if (
-                allow_degrade
-                and mode != "direct"
-                and (len(selected) > threshold or (total and len(selected) / total > ratio_limit))
-            ):
-                project_degraded = True
-                notes.append(
-                    f"{project.name}：受影响测试 {len(selected)}/{total} 超过基础模块阈值"
-                    f"（{threshold} 个或 {ratio_limit:.0%}）⇒ 退化工程级全量"
-                )
+            over_threshold = mode != "direct" and (
+                len(selected) > threshold or (total and len(selected) / total > ratio_limit)
+            )
+            if over_threshold:
+                if not allow_degrade:
+                    offload_hints.setdefault(project.name, []).append(
+                        f"受影响测试 {len(selected)}/{total} 超基础模块阈值"
+                    )
+                    notes.append(
+                        f"{project.name}：受影响测试 {len(selected)}/{total} 超过基础模块阈值"
+                        f"（{threshold} 个或 {ratio_limit:.0%}）⇒ 超出部分交 CI 全量回归"
+                    )
+                else:
+                    project_degraded = True
+                    notes.append(
+                        f"{project.name}：受影响测试 {len(selected)}/{total} 超过基础模块阈值"
+                        f"（{threshold} 个或 {ratio_limit:.0%}）⇒ 退化工程级全量"
+                    )
             if project_degraded:
                 selected.update(files)
                 degraded = True
@@ -850,6 +864,19 @@ def build_selection(
                 break
     if guard_added:
         notes.extend(guard_notes)
+
+    offload: list[str] = []
+    for project in graph.projects:
+        hints = offload_hints.get(project.name)
+        if not hints:
+            continue
+        total = len(graph.test_files[project.name])
+        picked = len(selected_by_project[project.name])
+        if total > picked:
+            offload.append(
+                f"{project.name}：本地选中 {picked}/{total}，其余 {total - picked} 个测试文件"
+                f"交 CI 全量回归（{'；'.join(hints)}）"
+            )
 
     test_paths: list[str] = []
     metrics: list[ProjectMetrics] = []
@@ -880,6 +907,7 @@ def build_selection(
         total=sum(metric.total for metric in metrics),
         projects=tuple(metrics),
         notes=tuple(notes),
+        ci_offload=tuple(offload),
     )
 
 

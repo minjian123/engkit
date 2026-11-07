@@ -133,9 +133,14 @@ def _build_parser() -> argparse.ArgumentParser:
     push.add_argument("--full", action="store_true", help="全量静态 + 定向用例（缺省按变更自动选档；全量测试只在 CI）")
     push.add_argument("--remote", default="", help="远端名（缺省取配置）")
     push.add_argument("--branch", default="", help="目标分支（缺省取配置或当前分支）")
-    push.add_argument("--jobs", default=preflight.DEFAULT_JOBS, help="并行档位")
-    push.add_argument("--budget-seconds", type=float, default=None, help="总体预算（秒）")
-    push.add_argument("--step-seconds", type=float, default=None, help="单步预算（秒）")
+    push.add_argument("--jobs", default=preflight.DEFAULT_JOBS, help="并行档位（off / 0 等串行取值一律拒绝）")
+    push.add_argument(
+        "--budget-seconds",
+        type=float,
+        default=None,
+        help="总体预算（秒）；受 600s 推送硬上限封顶，不可越界",
+    )
+    push.add_argument("--step-seconds", type=float, default=None, help="单步预算（秒）；同样受封顶")
 
     hook = subparsers.add_parser("guard", parents=[common], help="重命令拦截")
     actions = hook.add_subparsers(dest="action", required=True)

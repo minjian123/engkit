@@ -203,7 +203,7 @@ def test_push_command(git_repo: Path, tmp_path: Path, capsys) -> None:
     subprocess.run(["git", "remote", "add", "origin", str(remote)], cwd=git_repo, check=True)
     subprocess.run(["git", "push", "-q", "-u", "origin", "HEAD"], cwd=git_repo, check=True)
 
-    assert cli.main(["push", "--root", str(git_repo), "--jobs", "off"]) == 0
+    assert cli.main(["push", "--root", str(git_repo), "--jobs", "auto"]) == 0
     assert "没有待推送的提交" in capsys.readouterr().out
 
 

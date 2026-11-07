@@ -71,7 +71,7 @@ def test_resolve_mode() -> None:
 def test_push_detached_head(git_repo: Path, cfg, capsys) -> None:
     """游离 HEAD（无法确定推送分支）直接拒绝。"""
     git(git_repo, "checkout", "-q", "--detach", "HEAD")
-    code = push.run_push(cfg, jobs="off")
+    code = push.run_push(cfg, jobs="auto")
     assert code == 1
     assert "游离 HEAD" in capsys.readouterr().out
 
@@ -79,7 +79,7 @@ def test_push_detached_head(git_repo: Path, cfg, capsys) -> None:
 def test_push_dirty(git_repo: Path, cfg, capsys) -> None:
     """工作树脏即拒绝（提示先提交）。"""
     (git_repo / "dirty.txt").write_text("x", encoding="utf-8")
-    code = push.run_push(cfg, jobs="off")
+    code = push.run_push(cfg, jobs="auto")
     assert code == 1
     assert "未提交改动" in capsys.readouterr().out
 
@@ -88,14 +88,14 @@ def test_push_dirty_truncates(git_repo: Path, cfg, capsys) -> None:
     """脏条目超过 5 处时从略。"""
     for index in range(7):
         (git_repo / f"dirty{index}.txt").write_text("x", encoding="utf-8")
-    assert push.run_push(cfg, jobs="off") == 1
+    assert push.run_push(cfg, jobs="auto") == 1
     assert "其余 2 处从略" in capsys.readouterr().out
 
 
 def test_push_nothing_to_push(git_repo: Path, cfg, tmp_path: Path, capsys) -> None:
     """没有待推提交时直接返回 0。"""
     _remote(git_repo, tmp_path)
-    code = push.run_push(cfg, jobs="off")
+    code = push.run_push(cfg, jobs="auto")
     assert code == 0
     assert "没有待推送的提交" in capsys.readouterr().out
 
@@ -104,7 +104,7 @@ def test_push_docs_fast(git_repo: Path, cfg, tmp_path: Path, capsys) -> None:
     """待推提交全为文档：走快速档并真推送（不再有「只验不推」出口）。"""
     _remote(git_repo, tmp_path)
     _commit(git_repo, "docs/项目/记录.md")
-    code = push.run_push(cfg, jobs="off")
+    code = push.run_push(cfg, jobs="auto")
     assert code == 0
     out = capsys.readouterr().out
     assert "档位：快速" in out
@@ -115,7 +115,7 @@ def test_push_code_scoped(git_repo: Path, cfg, tmp_path: Path, capsys) -> None:
     """含代码改动：走定向档。"""
     _remote(git_repo, tmp_path)
     _commit(git_repo, "backend/libs/pkg_a/src/pkg_a/new.py")
-    assert push.run_push(cfg, jobs="off") == 0
+    assert push.run_push(cfg, jobs="auto") == 0
     assert "档位：定向" in capsys.readouterr().out
 
 
@@ -123,14 +123,14 @@ def test_push_full(git_repo: Path, cfg, tmp_path: Path, capsys) -> None:
     """显式全量档优先于按变更选档。"""
     _remote(git_repo, tmp_path)
     _commit(git_repo, "docs/项目/记录.md")
-    assert push.run_push(cfg, full=True, jobs="off") == 0
+    assert push.run_push(cfg, full=True, jobs="auto") == 0
     assert "档位：全量" in capsys.readouterr().out
 
 
 def test_push_remote_branch_missing(git_repo: Path, cfg, capsys) -> None:
     """远端无该分支：按代码改动处理并提示，随后推送失败返回非 0（无「只验不推」出口）。"""
     _commit(git_repo, "docs/项目/记录.md")
-    code = push.run_push(cfg, jobs="off")
+    code = push.run_push(cfg, jobs="auto")
     out = capsys.readouterr().out
     assert "远端无该分支" in out
     assert code != 0
@@ -149,7 +149,7 @@ def test_push_preflight_fails(git_repo: Path, cfg, tmp_path: Path, capsys) -> No
             self_tests=(),
         ),
     )
-    assert push.run_push(failing, jobs="off") == 1
+    assert push.run_push(failing, jobs="auto") == 1
     assert "已中止推送" in capsys.readouterr().out
 
 
@@ -157,7 +157,7 @@ def test_push_success(git_repo: Path, cfg, tmp_path: Path, capsys) -> None:
     """预检通过后真推送成功。"""
     remote = _remote(git_repo, tmp_path)
     _commit(git_repo, "docs/项目/记录.md")
-    assert push.run_push(cfg, jobs="off") == 0
+    assert push.run_push(cfg, jobs="auto") == 0
     assert "推送完成" in capsys.readouterr().out
     heads = subprocess.run(
         ["git", "rev-parse", "HEAD"],
@@ -180,7 +180,7 @@ def test_push_failure_returns_code(git_repo: Path, cfg, capsys) -> None:
     """推送失败返回 git 的退出码（预检结论仍有效）。"""
     _commit(git_repo, "docs/项目/记录.md")
     git(git_repo, "remote", "add", "origin", str(Path(git_repo).parent / "missing.git"))
-    assert push.run_push(cfg, jobs="off") != 0
+    assert push.run_push(cfg, jobs="auto") != 0
     assert "推送失败" in capsys.readouterr().out
 
 
@@ -195,4 +195,4 @@ def test_push_explicit_remote_and_branch(git_repo: Path, cfg, tmp_path: Path) ->
         capture_output=True,
         text=True,
     ).stdout.strip()
-    assert push.run_push(cfg, remote="origin", branch=branch, jobs="off") == 0
+    assert push.run_push(cfg, remote="origin", branch=branch, jobs="auto") == 0

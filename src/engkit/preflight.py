@@ -38,6 +38,17 @@ _METRICS_RE = re.compile(r"\[test-selection\] picked=(\d+)/(\d+) degraded=(true|
 TIMEOUT_CODE = 124
 """单轮超时退出码（与既有口径一致）。"""
 
+PUSH_MAX_TOTAL_SECONDS = 600.0
+"""单次 `engkit push` 全链路（预检 + git push）硬上限（秒）。
+
+常量而非配置项：CLI 的 `--budget-seconds` / `--step-seconds` 一律被 `min(请求值, 600)` 封顶，
+任何仓、任何档位都绕不过；CI 手动 `engkit preflight` 不受此限（CI 靠 runner / 分片横向扩）。
+口径见《工程化工具包说明》§4.7。
+"""
+
+_PYTEST_ELAPSED_RE = re.compile(r"in ([\d.]+)s \(0:")
+"""pytest 结论行的单轮耗时（供耗时汇总逐轮列出）。"""
+
 DEFAULT_ARGV_BUDGET = 6000
 """单条 pytest 命令的路径参数字符预算。
 
@@ -67,10 +78,39 @@ class Budget:
     total_seconds: float
     started: float = field(default_factory=time.monotonic)
     exhausted: bool = False
+    timings: list[tuple[str, float, str]] = field(default_factory=list)
+    test_rounds: list[float] = field(default_factory=list)
+    ci_offload: tuple[str, ...] = ()
 
     def remaining(self) -> float:
         """总体剩余预算（秒；可为负）。"""
         return self.total_seconds - (time.monotonic() - self.started)
+
+    def record(self, label: str, seconds: float, kind: str = "static") -> None:
+        """记一步耗时（`kind` = `static` 静态与护栏 / `tests` 定向测试段）。
+
+        Args:
+            label: 步骤标签。
+            seconds: 本步耗时（秒）。
+            kind: 耗时归类。
+        """
+        self.timings.append((label, seconds, kind))
+
+
+def cap_push_budget(step: float, total: float, *, from_push: bool) -> tuple[float, float]:
+    """推送入口的预算封顶（CLI 不可越过 600s 硬上限）。
+
+    Args:
+        step: 请求的单步预算（秒）。
+        total: 请求的总体预算（秒）。
+        from_push: 是否由 `engkit push` 触发（CI 手动预检不封顶）。
+
+    Returns:
+        tuple[float, float]: （单步, 总体）实际生效预算。
+    """
+    if not from_push:
+        return (step, total)
+    return (min(step, PUSH_MAX_TOTAL_SECONDS), min(total, PUSH_MAX_TOTAL_SECONDS))
 
 
 class Tee:
@@ -243,7 +283,7 @@ def _resolve_cwd(cfg: Config, rel: str) -> Path:
     return cfg.root / (rel or cfg.preflight.cwd)
 
 
-def execute(
+def _execute_raw(
     label: str,
     argv: list[str],
     cwd: Path,
@@ -255,7 +295,7 @@ def execute(
     capture: list[str] | None = None,
     optional: bool = False,
 ) -> bool:
-    """执行一条命令（受预算护栏约束，逐行实时透传）。
+    """执行一条命令（受预算护栏约束，逐行实时透传；耗时由 `execute` 统一记录）。
 
     Args:
         label: 步骤标签。
@@ -323,6 +363,50 @@ def execute(
         return False
     note(f"通过（{_elapsed(started)}）")
     return True
+
+
+def execute(
+    label: str,
+    argv: list[str],
+    cwd: Path,
+    budget: Budget,
+    failures: list[str],
+    *,
+    timeout: float | None = None,
+    env: dict[str, str] | None = None,
+    capture: list[str] | None = None,
+    optional: bool = False,
+) -> bool:
+    """执行一条命令并把耗时记入预算（供结论段汇总慢点）。
+
+    Args:
+        label: 步骤标签。
+        argv: 命令与参数。
+        cwd: 工作目录。
+        budget: 预算护栏。
+        failures: 失败收集列表。
+        timeout: 本步显式超时（秒）。
+        env: 子进程环境变量。
+        capture: 传入列表时收集全部输出行。
+        optional: 命令不存在时只打印跳过、不计失败。
+
+    Returns:
+        bool: 是否成功。
+    """
+    started = time.monotonic()
+    ok = _execute_raw(
+        label,
+        argv,
+        cwd,
+        budget,
+        failures,
+        timeout=timeout,
+        env=env,
+        capture=capture,
+        optional=optional,
+    )
+    budget.record(label, time.monotonic() - started)
+    return ok
 
 
 def _elapsed(started: float) -> str:
@@ -788,6 +872,7 @@ def run_selected(
     report_path: str = "",
     depth: str = "",
     allow_full: bool = False,
+    offload_to_ci: bool = False,
 ) -> int:
     """推导 → 跑 pytest → 覆盖率判定 → 扩圈 → 退化 → 度量。
 
@@ -808,14 +893,23 @@ def run_selected(
         pytest_args: 透传 pytest 参数。
         report_path: 覆盖率报告落点（相对仓根；缺省与数据文件同目录的 `report.json`）。
         depth: 依赖深度（空串取配置；预检固定传 `closure`）。
-        allow_full: 是否允许退化 / 强制全量（仅推送入口与 CI 传 True；开发环恒 False）。
+        allow_full: 是否允许退化 / 强制全量（仅 CI / 显式全量档传 True；开发环与推送环恒 False）。
+        offload_to_ci: 分层归位模式（推送环传 True）：不退化全量，超出可推导影响面的部分
+            显式登记「交 CI 全量回归」；扩圈无果判失败而不是全量重跑。
 
     Returns:
         int: pytest 退出码 / 覆盖率或推导异常 1 / 超时 124 / 本地要求全量 2。
     """
     if force_full and not allow_full:
-        print("[test-selection] 拒绝执行：本地不允许强制全量（全量测试只由 CI 执行）。", file=sys.stderr)
-        print("  改完直接提交：提交前预检按改动面跑全，一次拿到完整失败清单", file=sys.stderr)
+        if offload_to_ci:
+            print(
+                "[test-selection] 拒绝执行：变更基准不可解析 ⇒ 无法推导影响面"
+                "（全量交 CI 但本地无覆盖证据）；请修正基准后重试。",
+                file=sys.stderr,
+            )
+        else:
+            print("[test-selection] 拒绝执行：本地不允许强制全量（全量测试只由 CI 执行）。", file=sys.stderr)
+            print("  改完直接提交：提交前预检按改动面跑全，一次拿到完整失败清单", file=sys.stderr)
         return 2
     workdir = cfg.root / (pytest_cwd or cfg.pytest.cwd)
     try:
@@ -835,7 +929,14 @@ def run_selected(
             )
         except RuntimeError as error:
             if not allow_full:
-                print(f"[test-selection] {error}；本地不允许退化全量（全量测试只由 CI 执行）。", file=sys.stderr)
+                if offload_to_ci:
+                    print(
+                        f"[test-selection] {error}；变更基准不可解析 ⇒ 无法推导影响面"
+                        "（全量交 CI 但本地无覆盖证据），拒绝本地推送。",
+                        file=sys.stderr,
+                    )
+                else:
+                    print(f"[test-selection] {error}；本地不允许退化全量（全量测试只由 CI 执行）。", file=sys.stderr)
                 return 2
             out(f"[test-selection] {error} ⇒ 显式退化全量")
             changed = []
@@ -847,11 +948,13 @@ def run_selected(
         return 1
     if result.reason:
         out(f"[test-selection] 退化：{result.reason}")
-    if not allow_full and result.degraded and result.picked:
+    if not allow_full and not offload_to_ci and result.degraded and result.picked:
         print("[test-selection] 拒绝执行：本地不允许退化全量（全量测试只由 CI 执行）。", file=sys.stderr)
         return 2
     for item in result.notes:
         out(f"[test-selection] 说明：{item}")
+    for item in result.ci_offload:
+        out(f"[test-selection] 交 CI 全量回归：{item}")
     if result.total:
         out(
             f"[test-selection] 变更 {len(changed)} 个文件；选中 {result.picked}/{result.total} 测试文件"
@@ -938,6 +1041,13 @@ def run_selected(
                 print_metrics(len(test_paths), result.total, degraded, rounds, len(cov_modules))
                 return 1
             reason = "扩圈无新增测试" if len(merged) == len(test_paths) else "扩圈轮次用尽"
+            if offload_to_ci:
+                out(
+                    f"[test-selection] {reason} ⇒ 覆盖率缺口模块（{'、'.join(missing)}）交 CI 全量回归；"
+                    "本地判失败（覆盖率门槛不降，不用全量重跑兜底）"
+                )
+                print_metrics(len(test_paths), result.total, degraded, rounds, len(cov_modules))
+                return 1
             out(f"[test-selection] {reason} ⇒ 退化工程级全量重跑（覆盖率缺口模块：{'、'.join(missing)}）")
             test_paths = selection.all_test_paths(cfg)
             degraded = True
@@ -966,7 +1076,8 @@ def _run_scoped_step(
     """
     section("定向：按 git 变更推导受影响范围")
     try:
-        preview = selection.build_selection(cfg, changes, depth="closure")
+        # 分层归位：推送环本地只跑可推导影响面，不退化全量（超出部分显式交 CI）。
+        preview = selection.build_selection(cfg, changes, depth="closure", allow_degrade=False)
     except RuntimeError as error:
         failures.append(str(error))
         note(f"失败（{error}）")
@@ -975,8 +1086,14 @@ def _run_scoped_step(
         note(f"退化：{preview.reason}")
     for item in preview.notes:
         note(f"说明：{item}")
+    budget.ci_offload = preview.ci_offload
+    for item in preview.ci_offload:
+        note(f"交 CI 全量回归：{item}")
     if not preview.test_paths:
-        out("  无后端变更 ⇒ 跳过 pytest（静态与护栏段已执行；全量交 CI）")
+        if preview.ci_offload:
+            out("  无可推导的本地定向用例 ⇒ 跳过 pytest（超出部分交 CI，条目已逐条列明）")
+        else:
+            out("  无后端变更 ⇒ 跳过 pytest（静态与护栏段已执行；全量交 CI）")
         return
     ratio = preview.picked / preview.total if preview.total else 0.0
     out(f"  测试文件：{preview.picked}/{preview.total}（{ratio:.1%}）")
@@ -987,6 +1104,7 @@ def _run_scoped_step(
         return
     sink: list[str] = []
     out("\n[engkit] 后端测试：定向（选测 + 覆盖率门禁 + 扩圈）")
+    test_started = time.monotonic()
     with contextlib.redirect_stdout(Tee(sys.stdout, sink)):
         code = run_selected(
             cfg,
@@ -995,8 +1113,11 @@ def _run_scoped_step(
             cov=not no_cov,
             timeout=limit,
             depth="closure",
-            allow_full=True,
+            allow_full=False,
+            offload_to_ci=True,
         )
+    budget.record("后端测试：定向（选测 + 覆盖率门禁 + 扩圈）", time.monotonic() - test_started, "tests")
+    budget.test_rounds.extend(float(item) for item in _PYTEST_ELAPSED_RE.findall("\n".join(sink)))
     summary = metrics_summary(sink)
     if summary:
         out(f"[engkit] 选测度量：{summary}")
@@ -1116,6 +1237,43 @@ def resolve_mode(*, full: bool) -> str:
     return "full" if full else "fast"
 
 
+def print_timing_summary(budget: Budget, started: float, *, from_push: bool) -> None:
+    """结论段前输出耗时汇总与慢点诊断（把 `duration_seconds` 从审计文件提到日志）。
+
+    Args:
+        budget: 预算护栏（含逐步耗时与交 CI 条目）。
+        started: 单次 push 全链路墙钟起点。
+        from_push: 是否由推送入口触发（决定硬上限口径）。
+    """
+    total = time.monotonic() - started
+    cap = PUSH_MAX_TOTAL_SECONDS if from_push else budget.total_seconds
+    tests = [item for item in budget.timings if item[2] == "tests"]
+    static = [item for item in budget.timings if item[2] == "static"]
+    tests_sum = sum(item[1] for item in tests)
+    static_sum = sum(item[1] for item in static)
+    percent = f"{total / cap:.1%}" if cap > 0 else "—"
+    tests_pct = f"{tests_sum / total:.1%}" if total > 0 else "—"
+    out(f"\n[engkit] 耗时汇总：总耗时 {total:.1f}s / 上限 {cap:.0f}s（{percent}）")
+    rounds = "、".join(f"第 {index} 轮 {value:.1f}s" for index, value in enumerate(budget.test_rounds, 1))
+    out(f"  测试段：{tests_sum:.1f}s（占 {tests_pct}）{('　' + rounds) if rounds else '　逐轮明细未采集到'}")
+    out(f"  静态与护栏步骤：合计 {static_sum:.1f}s（{len(static)} 项）")
+    out("  最慢 5 步：" if budget.timings else "  最慢 5 步：无执行记录")
+    slowest = sorted(budget.timings, key=lambda item: item[1], reverse=True)[:5]
+    for index, (label, seconds, _kind) in enumerate(slowest, 1):
+        out(f"    {index}. {seconds:.1f}s　{label}")
+    if budget.ci_offload:
+        out(f"  交 CI 全量回归：{len(budget.ci_offload)} 项")
+        for item in budget.ci_offload:
+            out(f"    - {item}")
+    out(f"  审计：duration_seconds={total:.1f}")
+    over = from_push and total >= PUSH_MAX_TOTAL_SECONDS
+    if over or budget.exhausted:
+        out(
+            f"[engkit] 拒绝：单次 push 全链路超过 {PUSH_MAX_TOTAL_SECONDS:.0f}s 硬上限 —— 本次不推送"
+            "（不放宽上限 / 不降覆盖率门槛 / 不自动重试）；慢点见上方最慢 5 步"
+        )
+
+
 def run_preflight(
     cfg: Config,
     *,
@@ -1126,6 +1284,7 @@ def run_preflight(
     step_seconds: float | None = None,
     budget_seconds: float | None = None,
     from_push: bool = False,
+    wall_started: float | None = None,
 ) -> int:
     """执行预检。
 
@@ -1135,9 +1294,10 @@ def run_preflight(
         jobs: 并行档位。
         no_cov: 是否跳过覆盖率门禁。
         no_scope: 是否跳过逐工程范围（仅全量档有意义）。
-        step_seconds: 单步预算覆盖。
-        budget_seconds: 总体预算覆盖。
+        step_seconds: 单步预算覆盖（推送入口受 600s 硬上限封顶）。
+        budget_seconds: 总体预算覆盖（推送入口受 600s 硬上限封顶）。
         from_push: 是否由推送入口（`engkit push`）调用；本地手动调用一律拒绝。
+        wall_started: 单次 push 全链路墙钟起点（由 `run_push` 传入，与预检预算同源）。
 
     Returns:
         int: 退出码（0 全通过 / 1 有失败项或被闸门拒绝 / 2 本地手动调用）。
@@ -1164,18 +1324,25 @@ def run_preflight(
         print(preflight_gate.guidance(decision), file=sys.stderr)
         preflight_gate.write(cfg, event=preflight_gate.EVENT_REJECTED, mode=mode, decision=decision)
         return 1
-    started = time.monotonic()
+    started = wall_started if wall_started is not None else time.monotonic()
     scoped_budget, full_budget = cfg.preflight.budget.scoped, cfg.preflight.budget.full
     default_step, default_total = full_budget if mode == "full" else scoped_budget
-    budget = Budget(
-        step_seconds=default_step if step_seconds is None else step_seconds,
-        total_seconds=default_total if budget_seconds is None else budget_seconds,
+    effective_step, effective_total = cap_push_budget(
+        default_step if step_seconds is None else step_seconds,
+        default_total if budget_seconds is None else budget_seconds,
+        from_push=from_push,
     )
+    budget = Budget(step_seconds=effective_step, total_seconds=effective_total, started=started)
     label = {
         "full": "全量静态 + 定向用例（显式 --full；全量测试只在 CI）",
         "fast": "快速（只静态）",
     }.get(mode, "定向（快路径；全量请显式 --full）")
     out(f"[engkit] 档位：{label}")
+    if from_push:
+        out(
+            f"[engkit] 时长闸门：单次 push 全链路 ≤ {PUSH_MAX_TOTAL_SECONDS:.0f}s"
+            "（预检 + git push，CLI 不可覆盖；超限拒绝且不执行 git push）"
+        )
     out(
         f"[engkit] 预算护栏：单步 {budget.step_seconds:.0f}s / 总体 {budget.total_seconds:.0f}s"
         "（超时即中止，全量交 CI）"
@@ -1193,6 +1360,10 @@ def run_preflight(
     for step in cfg.preflight.steps:
         if not step_applies(step, mode):
             continue
+        if from_push and budget.remaining() <= 0:
+            budget.exhausted = True
+            failures.append(f"推送时长闸门：单次 push 超过 {PUSH_MAX_TOTAL_SECONDS:.0f}s 硬上限")
+            break
         if step.type == "scoped_tests":
             if mode == "full" and guard.is_ci():
                 # CI 全量档只跑全量用例，避免与定向档重复
@@ -1207,16 +1378,19 @@ def run_preflight(
                 run_project_tests(cfg, budget, failures, jobs=jobs)
             continue
         _execute_step(cfg, step, changes, budget, failures)
-    run_self_tests(cfg, budget, failures, force_all=mode in ("fast", "full"), mode=mode)
+    if not budget.exhausted:
+        run_self_tests(cfg, budget, failures, force_all=mode in ("fast", "full"), mode=mode)
     if budget.exhausted:
-        out("\n[engkit] 提示：预算护栏已中止剩余步骤 —— 全量与集成交 CI（推送后按需触发流水线）。")
+        out("\n[engkit] 提示：预算 / 时长闸门已中止剩余步骤 —— 本次不推送；全量与集成交 CI（按需手工触发流水线）。")
+    print_timing_summary(budget, started, from_push=from_push)
     code = finish("preflight", failures)
+    duration = time.monotonic() - started
     preflight_gate.write(
         cfg,
         event=preflight_gate.EVENT_RUN,
         mode=mode,
         decision=decision,
-        duration_seconds=time.monotonic() - started,
+        duration_seconds=duration,
         exit_code=code,
     )
     return code

@@ -301,10 +301,12 @@ class PushConfig:
         remote: 远端名。
         branch: 目标分支（空串取当前分支）。
         doc_globs: 视为文档的文件名模式；待推提交全为文档时自动降为快速档。
+        ci_trigger_hint: CI 手工触发入口提示（仓侧声明；包内不写仓名 / 路径字面）。
     """
 
     remote: str = "origin"
     branch: str = ""
+    ci_trigger_hint: str = ""
     doc_globs: tuple[str, ...] = (
         "*.md",
         "*.txt",
@@ -2187,11 +2189,12 @@ def parse(raw: dict[str, Any], path: Path) -> Config:
     )
 
     push_table = _table(raw, "push", "push")
-    _check_keys(push_table, ("remote", "branch", "doc_globs"), "push")
+    _check_keys(push_table, ("remote", "branch", "doc_globs", "ci_trigger_hint"), "push")
     push = PushConfig(
         remote=_string(push_table, "remote", "push", "origin"),
         branch=_string(push_table, "branch", "push", ""),
         doc_globs=_strings(push_table, "doc_globs", "push") or PushConfig().doc_globs,
+        ci_trigger_hint=_string(push_table, "ci_trigger_hint", "push", ""),
     )
 
     guard_table = _table(raw, "guard", "guard")
