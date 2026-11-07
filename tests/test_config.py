@@ -274,3 +274,46 @@ def test_base_config_parses(build_repo) -> None:
     """缺省夹具配置可解析（防夹具漂移）。"""
     root = build_repo()
     assert load(root / "engkit.toml").backend is not None
+
+
+def test_step_scope_illegal(build_repo) -> None:
+    """步骤 `scope` 只允许 `full` / `changed-closure`。"""
+    from conftest import BASE_CONFIG
+
+    config = BASE_CONFIG.replace(
+        "optional = true },",
+        'optional = true },\n  { label = "范围非法", cmd = ["x"], scope = "bogus" },',
+    )
+    root = build_repo(config=config)
+    with pytest.raises(ConfigError, match="`scope` 非法"):
+        load(root / "engkit.toml")
+
+
+def test_checks_runner_illegal(build_repo) -> None:
+    """`checks_runner` 只允许 `single` / `process`（未知值 fail-closed）。"""
+    from conftest import BASE_CONFIG
+
+    config = BASE_CONFIG.replace("[preflight]", '[preflight]\nchecks_runner = "bogus"')
+    root = build_repo(config=config)
+    with pytest.raises(ConfigError, match="`checks_runner` 非法"):
+        load(root / "engkit.toml")
+
+
+def test_reuse_defaults_and_overrides(build_repo) -> None:
+    """复用相关键的缺省值与显式覆盖。"""
+    from conftest import BASE_CONFIG
+
+    plain = load(build_repo() / "engkit.toml").preflight
+    assert plain.reuse is True
+    assert plain.reuse_file == ".cache/preflight/steps.json"
+    assert plain.reuse_ttl_days == 7
+    assert plain.checks_runner == "single"
+    config = BASE_CONFIG.replace(
+        "[preflight]",
+        '[preflight]\nreuse = false\nreuse_file = "x/steps.json"\nreuse_ttl_days = 3\nchecks_runner = "process"',
+    )
+    overridden = load(build_repo(config=config) / "engkit.toml").preflight
+    assert overridden.reuse is False
+    assert overridden.reuse_file == "x/steps.json"
+    assert overridden.reuse_ttl_days == 3
+    assert overridden.checks_runner == "process"

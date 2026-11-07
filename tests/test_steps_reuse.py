@@ -357,6 +357,27 @@ def test_prune_caps_entries() -> None:
     assert len(kept) == steps_reuse.MAX_ENTRIES
 
 
+def test_preflight_reuse_disabled_runs_all(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """`reuse = false` 时预检不做复用：打印关闭说明、全部真跑、不写记录。"""
+    from engkit import preflight
+
+    root = _tree_repo(
+        tmp_path,
+        config=(
+            '[docs]\nroot = "docs"\n'
+            '[backend]\nroot = "backend"\ngroups = ["libs"]\n'
+            "[preflight]\nreuse = false\nsteps = [\n"
+            '  { label = "标记步骤", cmd = ["{python}", "-c", "pass"], inputs = ["backend/libs/pkg_a/src"] },\n'
+            "]\n"
+            "[preflight.gate]\ndirty_tree = false\n"
+        ),
+    )
+    cfg = load(root / "engkit.toml")
+    assert preflight.run_preflight(cfg, mode="fast", jobs="off", no_cov=True, no_scope=True, from_push=True) == 0
+    assert "步骤结果复用：关闭" in capsys.readouterr().out
+    assert not (root / cfg.preflight.reuse_file).exists()
+
+
 def test_step_scope_replacement(tmp_path: Path) -> None:
     """`changed-closure` 把仓根参数替换为闭包清单；退化时原样执行。"""
     from engkit import preflight, selection

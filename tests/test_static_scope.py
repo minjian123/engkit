@@ -119,6 +119,27 @@ def test_apply_scope_degrades_when_reason(build_repo: Any) -> None:
     assert preflight._apply_scope(cfg, step, ["pyright", "."], ["backend/pyproject.toml"]) == ["pyright", "."]
 
 
+def test_loose_module_skipped(build_repo: Any) -> None:
+    """`src` 下非包内的 `.py` 不进模块表（闭包推导跳过，不误判为改动源）。"""
+    root = build_repo(files={"backend/libs/pkg_a/src/loose.py": "x = 1\n"})
+    cfg = load(root / "engkit.toml")
+    scope = selection.reverse_scope(cfg, [UTIL])
+    assert scope.degraded is False
+    assert "backend/libs/pkg_a/src/loose.py" not in scope.files
+
+
+def test_reverse_closure_collects_all_dependents(build_repo: Any) -> None:
+    """菱形依赖下闭包收集全部反向依赖者，且重复出现的依赖者不重复入闭包。"""
+    root = build_repo(
+        files={"backend/libs/pkg_a/src/pkg_a/other.py": "from pkg_a.core import run\nfrom pkg_a.util import helper\n"}
+    )
+    cfg = dataclasses.replace(load(root / "engkit.toml"), base_ratio=1.0)
+    scope = selection.reverse_scope(cfg, [UTIL])
+    assert scope.degraded is False
+    assert "backend/libs/pkg_a/src/pkg_a/other.py" in scope.files
+    assert CORE in scope.files
+
+
 def _step() -> Any:
     """构造一个 pyright 步骤。
 
