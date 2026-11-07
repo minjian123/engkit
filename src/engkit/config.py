@@ -479,6 +479,10 @@ class BackendBaseRules:
         datasources: 合法数据源段。
         default_chain: 缺省链名。
         domain_layout: 域布局 JSON（迁移清单域目录据此校验）。
+        profile: 仓库形态（`platform` 平台仓 / `product` 产品仓）。
+        base_source_dirs: 产品仓用于**父类解析**的平台基座源码面（不参与清单对账与形态判定）。
+        error_code_digits: 错误码位数（平台 5 位 / 产品 6 位）。
+        error_code_segment: 产品码段位（2 位；平台形态留空）。
     """
 
     manifest: str
@@ -493,6 +497,10 @@ class BackendBaseRules:
     datasources: tuple[str, ...]
     default_chain: str
     domain_layout: str = ""
+    profile: str = "platform"
+    base_source_dirs: tuple[str, ...] = ()
+    error_code_digits: int = 5
+    error_code_segment: str = ""
 
 
 @dataclass(frozen=True)
@@ -1480,9 +1488,21 @@ def _parse_backend_base_rules(table: dict[str, Any], where: str) -> BackendBaseR
             "datasources",
             "default_chain",
             "domain_layout",
+            "profile",
+            "base_source_dirs",
+            "error_code_digits",
+            "error_code_segment",
         ),
         where,
     )
+    profile = _string(table, "profile", where, "platform")
+    if profile not in ("platform", "product"):
+        raise _fail(where, "`profile` 取值应为 `platform` / `product`")
+    segment = _string(table, "error_code_segment", where, "")
+    if segment and not (len(segment) == 2 and segment.isdigit()):
+        raise _fail(where, "`error_code_segment` 应为 2 位数字（产品码段位）")
+    if profile == "product" and not segment:
+        raise _fail(where, "`profile = \"product\"` 须同时登记 `error_code_segment`（2 位段位）")
     return BackendBaseRules(
         manifest=_string(table, "manifest", where),
         chain_doc=_string(table, "chain_doc", where),
@@ -1496,6 +1516,10 @@ def _parse_backend_base_rules(table: dict[str, Any], where: str) -> BackendBaseR
         datasources=_strings(table, "datasources", where),
         default_chain=_string(table, "default_chain", where),
         domain_layout=_string(table, "domain_layout", where, ""),
+        profile=profile,
+        base_source_dirs=_strings(table, "base_source_dirs", where),
+        error_code_digits=_scalar(table, "error_code_digits", where, int, 6 if profile == "product" else 5),
+        error_code_segment=segment,
     )
 
 

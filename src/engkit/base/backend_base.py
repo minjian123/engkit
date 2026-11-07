@@ -161,6 +161,31 @@ def iter_source_files(cfg: Config, rule: BackendBaseRules, scope: set[str] | Non
     return files
 
 
+def iter_base_files(cfg: Config, rule: BackendBaseRules) -> list[Path]:
+    """枚举平台基座源码面（**只用于父类解析**，不作为判据实体）。
+
+    产品仓的基类体系自持清单只登记本仓的类与链，但链的父类落在平台基座包里；把平台源码面并入
+    继承索引后，链上的父类才能被解析到（否则每条链都报「代码未找到该类」）。
+
+    Args:
+        cfg: 仓配置。
+        rule: 规则段。
+
+    Returns:
+        list[Path]: 文件清单（按目录序遍历；目录不存在时为空）。
+    """
+    files: list[Path] = []
+    for rel in rule.base_source_dirs:
+        base = cfg.root / rel
+        if not base.is_dir():
+            continue
+        for path in sorted(base.rglob("*.py")):
+            if any(part in SKIP_DIR_NAMES for part in path.relative_to(base).parts[:-1]):
+                continue
+            files.append(path)
+    return files
+
+
 def index_classes(cfg: Config, rule: BackendBaseRules, scope: set[str] | None = None) -> dict[str, list[list[str]]]:
     """类名 → 父类名列表（重复定义保留全部）。
 
@@ -173,7 +198,7 @@ def index_classes(cfg: Config, rule: BackendBaseRules, scope: set[str] | None = 
         dict[str, list[list[str]]]: 继承索引。
     """
     index: dict[str, list[list[str]]] = {}
-    for path in iter_source_files(cfg, rule, scope):
+    for path in [*iter_source_files(cfg, rule, scope), *iter_base_files(cfg, rule)]:
         text = read_text(path)
         for cls, bases in CLASS_RE.findall(text):
             parents = [normalize_parent(base) for base in split_bases(bases)]
@@ -262,10 +287,16 @@ def check_manifest_coverage(
         int: 受检类数。
     """
     manifest_text = read_text(cfg.root / rule.manifest)
+    repo_names = (
+        {cls for path in iter_source_files(cfg, rule) for cls, _ in CLASS_RE.findall(read_text(path))}
+        if rule.base_source_dirs
+        else set(index)
+    )
     classes = sorted(
         name
         for name, definitions in index.items()
-        if not name.startswith("_")
+        if name in repo_names
+        and not name.startswith("_")
         and any("BaseObject" in parents for parents in definitions)
         and (scoped is None or name in scoped)
     )
@@ -509,7 +540,7 @@ def check_data_class_semantics(
 
 
 def check_error_segments(cfg: Config, rule: BackendBaseRules, outcome: Outcome, scope: set[str] | None = None) -> int:
-    """⑤ 错误码段位（5 位平台码且万位 1~9）。
+    """⑤ 错误码段位（平台：5 位平台码且万位 1~9；产品：`error_code_digits` 位且以 `error_code_segment` 起头）。
 
     Args:
         cfg: 仓配置。
@@ -529,6 +560,18 @@ def check_error_segments(cfg: Config, rule: BackendBaseRules, outcome: Outcome, 
     for name, raw in ERROR_CODE_RE.findall(body):
         value = int(raw)
         count += 1
+        if rule.profile == "product":
+            if len(raw) != rule.error_code_digits:
+                outcome.problems.append(
+                    f"[错误码] {name} = {value} 不是 {rule.error_code_digits} 位产品码"
+                    f"（段位 {rule.error_code_segment}）"
+                )
+            elif not raw.startswith(rule.error_code_segment):
+                outcome.problems.append(
+                    f"[错误码] {name} = {value} 段位应为 {rule.error_code_segment}"
+                    "（产品码段位取自服务行 errcode_segment，不手写段）"
+                )
+            continue
         if not (10000 <= value <= 99999):
             outcome.problems.append(f"[错误码] {name} = {value} 不是 5 位平台码（产品段 10xxxx 起不得混入）")
     return count
@@ -717,10 +760,18 @@ def collect(cfg: Config, rule: BackendBaseRules, scope: set[str] | None = None) 
     revs = check_alembic_chain(cfg, rule, outcome, scope)
     lines = [
         f"1. 继承链对账：检查 {chains} 条相邻关系（实现契约 §7 ↔ 代码）",
-        f"2. 清单对账（补充）：直接继承 BaseObject 的 {covered} 个基座类均已登记",
+        (
+            f"2. 清单对账：本仓直接继承 BaseObject 的 {covered} 个类均已登记"
+            if rule.profile == "product"
+            else f"2. 清单对账（补充）：直接继承 BaseObject 的 {covered} 个基座类均已登记"
+        ),
         f"3. 直继承合法性：检查 {direct} 个直接继承 BaseObject 的类（体系根 / 基线放行）",
         f"4. 数据类体系语义：检查 {shapes} 个类形态（值对象须 frozen dataclass / 框架对象不得 dataclass）",
-        f"5. 错误码段位：检查 {codes} 个平台码",
+        (
+            f"5. 错误码段位：检查 {codes} 个产品码（{rule.error_code_digits} 位，段位 {rule.error_code_segment}）"
+            if rule.profile == "product"
+            else f"5. 错误码段位：检查 {codes} 个平台码"
+        ),
         f"6. 迁移链：检查 {revs} 个 revision",
     ]
     if scope is not None:
@@ -822,7 +873,27 @@ def self_test() -> int:
         checked = check_error_segments(cfg, rule, outcome)
         expect(checked == 3, "错误码段位：受检 3 个")
         expect(len(outcome.problems) == 2, "错误码段位：越段与位数非法各报 1")
-    out(f"\n[check_backend_base self-test] {'通过' if ok else '不通过'}：断言用例 13 个")
+
+        product_errors = root / "product_errors.py"
+        product_errors.write_text(
+            "class MsgErrorCode(IntEnum):\n"
+            "    TOPIC_NOT_FOUND = 350001\n"
+            "    WRONG_SEGMENT = 330001\n"
+            "    TOO_SHORT = 35001\n",
+            encoding="utf-8",
+        )
+        product_rule = dataclasses.replace(
+            rule,
+            error_codes="product_errors.py",
+            profile="product",
+            error_code_digits=6,
+            error_code_segment="35",
+        )
+        product_outcome = Outcome()
+        product_checked = check_error_segments(cfg, product_rule, product_outcome)
+        expect(product_checked == 3, "产品形态：受检 3 个产品码")
+        expect(len(product_outcome.problems) == 2, "产品形态：段位不符与位数不足各报 1")
+    out(f"\n[check_backend_base self-test] {'通过' if ok else '不通过'}：断言用例 15 个")
     return 0 if ok else 1
 
 
