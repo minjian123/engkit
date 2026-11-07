@@ -101,21 +101,21 @@ def test_push_nothing_to_push(git_repo: Path, cfg, tmp_path: Path, capsys) -> No
 
 
 def test_push_docs_fast(git_repo: Path, cfg, tmp_path: Path, capsys) -> None:
-    """待推提交全为文档：走快速档，`--check` 不推送。"""
+    """待推提交全为文档：走快速档并真推送（不再有「只验不推」出口）。"""
     _remote(git_repo, tmp_path)
     _commit(git_repo, "docs/项目/记录.md")
-    code = push.run_push(cfg, check=True, jobs="off")
+    code = push.run_push(cfg, jobs="off")
     assert code == 0
     out = capsys.readouterr().out
     assert "档位：快速" in out
-    assert "--check 未推送" in out
+    assert "推送完成" in out
 
 
 def test_push_code_scoped(git_repo: Path, cfg, tmp_path: Path, capsys) -> None:
     """含代码改动：走定向档。"""
     _remote(git_repo, tmp_path)
     _commit(git_repo, "backend/libs/pkg_a/src/pkg_a/new.py")
-    assert push.run_push(cfg, check=True, jobs="off") == 0
+    assert push.run_push(cfg, jobs="off") == 0
     assert "档位：定向" in capsys.readouterr().out
 
 
@@ -123,15 +123,18 @@ def test_push_full(git_repo: Path, cfg, tmp_path: Path, capsys) -> None:
     """显式全量档优先于按变更选档。"""
     _remote(git_repo, tmp_path)
     _commit(git_repo, "docs/项目/记录.md")
-    assert push.run_push(cfg, check=True, full=True, jobs="off") == 0
+    assert push.run_push(cfg, full=True, jobs="off") == 0
     assert "档位：全量" in capsys.readouterr().out
 
 
 def test_push_remote_branch_missing(git_repo: Path, cfg, capsys) -> None:
-    """远端无该分支：按代码改动处理并提示。"""
+    """远端无该分支：按代码改动处理并提示，随后推送失败返回非 0（无「只验不推」出口）。"""
     _commit(git_repo, "docs/项目/记录.md")
-    assert push.run_push(cfg, check=True, jobs="off") == 0
-    assert "远端无该分支" in capsys.readouterr().out
+    code = push.run_push(cfg, jobs="off")
+    out = capsys.readouterr().out
+    assert "远端无该分支" in out
+    assert code != 0
+    assert "推送失败" in out
 
 
 def test_push_preflight_fails(git_repo: Path, cfg, tmp_path: Path, capsys) -> None:
@@ -192,4 +195,4 @@ def test_push_explicit_remote_and_branch(git_repo: Path, cfg, tmp_path: Path) ->
         capture_output=True,
         text=True,
     ).stdout.strip()
-    assert push.run_push(cfg, check=True, remote="origin", branch=branch, jobs="off") == 0
+    assert push.run_push(cfg, remote="origin", branch=branch, jobs="off") == 0

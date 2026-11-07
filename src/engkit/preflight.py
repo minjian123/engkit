@@ -1003,9 +1003,8 @@ def run_preflight(
     """
     if not from_push and not guard.is_ci():
         print(
-            "[engkit] 预检是**推送的内部步骤**，本地不再单独执行。\n"
+            "[engkit] 预检是**推送的内部步骤**，本地不再单独执行（也不提供「只跑预检、不推送」的出口）。\n"
             "  准备推送：engkit push（预检通过后自动推送）\n"
-            "  只验证不推送：engkit push --check\n"
             "  改完直接提交：提交前预检按改动面跑全（静态 + 护栏 + 定向用例 + 改动行覆盖率），一次拿到完整失败清单\n"
             "  CI 环境不受此限制。",
             file=sys.stderr,

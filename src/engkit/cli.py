@@ -118,7 +118,6 @@ def _build_parser() -> argparse.ArgumentParser:
     pre.add_argument("--self-test", action="store_true", help="只跑引擎自检")
 
     push = subparsers.add_parser("push", parents=[common], help="推送入口：预检通过后自动推送")
-    push.add_argument("--check", action="store_true", help="只跑预检、不推送")
     push.add_argument("--full", action="store_true", help="全量静态 + 定向用例（缺省按变更自动选档；全量测试只在 CI）")
     push.add_argument("--remote", default="", help="远端名（缺省取配置）")
     push.add_argument("--branch", default="", help="目标分支（缺省取配置或当前分支）")
@@ -620,7 +619,6 @@ def _cmd_push(args: argparse.Namespace) -> int:
     cfg = _load(args)
     return push.run_push(
         cfg,
-        check=args.check,
         full=args.full,
         remote=args.remote,
         branch=args.branch,

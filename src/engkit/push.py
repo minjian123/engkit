@@ -91,7 +91,6 @@ def _describe(mode: str, commits: list[str], files: list[str], known: bool) -> s
 def run_push(
     cfg: Config,
     *,
-    check: bool = False,
     full: bool = False,
     remote: str = "",
     branch: str = "",
@@ -103,7 +102,6 @@ def run_push(
 
     Args:
         cfg: 仓配置。
-        check: 只跑预检、不推送。
         full: 全量档（全量静态 + 全部自测 + 定向用例；不含全量测试）。
         remote: 远端名（空串取配置）。
         branch: 目标分支（空串取配置或当前分支）。
@@ -150,9 +148,6 @@ def run_push(
     if code != 0:
         note("[push] 预检未通过，已中止推送。")
         return code
-    if check:
-        out(f"[push] 预检通过（--check 未推送；待推 {len(commits)} 个提交）。")
-        return 0
     out(f"[push] 预检通过，推送 {target_remote}/{target_branch} ……")
     result = subprocess.run(
         ["git", "push", target_remote, f"HEAD:{target_branch}"],

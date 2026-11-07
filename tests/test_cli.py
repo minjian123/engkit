@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -195,10 +196,15 @@ def test_preflight_blocked(repo: Path, capsys) -> None:
     assert "推送的内部步骤" in capsys.readouterr().err
 
 
-def test_push_command(git_repo: Path, capsys) -> None:
-    """`push --check`：无待推提交时直接返回 0。"""
-    assert cli.main(["push", "--root", str(git_repo), "--check", "--jobs", "off"]) == 0
-    assert "[push]" in capsys.readouterr().out
+def test_push_command(git_repo: Path, tmp_path: Path, capsys) -> None:
+    """`push`：远端已同步时直接返回 0（`--check` 入口已移除，无「只验不推」出口）。"""
+    remote = tmp_path / "remote.git"
+    subprocess.run(["git", "init", "--bare", "-q", str(remote)], check=True)
+    subprocess.run(["git", "remote", "add", "origin", str(remote)], cwd=git_repo, check=True)
+    subprocess.run(["git", "push", "-q", "-u", "origin", "HEAD"], cwd=git_repo, check=True)
+
+    assert cli.main(["push", "--root", str(git_repo), "--jobs", "off"]) == 0
+    assert "没有待推送的提交" in capsys.readouterr().out
 
 
 def test_preflight_ci(repo: Path, monkeypatch, capsys) -> None:
