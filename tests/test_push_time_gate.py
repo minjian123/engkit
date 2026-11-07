@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -191,3 +192,42 @@ def test_scoped_step_offloads_to_ci(cfg, monkeypatch) -> None:
     assert captured["offload_to_ci"] is True
     assert not failures
     assert any(kind == "tests" for _label, _seconds, kind in budget.timings)
+
+
+def test_run_selected_offload_authorizes_internal_command(cfg, monkeypatch) -> None:
+    """分层归位下定向集成用例仍需内部命令授权，避免被全量守卫误拦。"""
+    captured: dict[str, object] = {}
+
+    def fake_pytest(argv, workdir, env, limit):
+        captured["env"] = env
+        return 0, []
+
+    monkeypatch.setattr(preflight, "run_pytest_once", fake_pytest)
+    code = preflight.run_selected(
+        cfg,
+        changed=["backend/libs/pkg_a/tests/core/test_core.py"],
+        cov=False,
+        offload_to_ci=True,
+        pytest_cmd=f'"{sys.executable}" -c pass',
+    )
+    assert code == 0
+    env = captured["env"]
+    assert env is not None
+    assert env[preflight.guard.FULL_AUTH_ENV] == "1"
+
+
+def test_run_push_uses_full_step_budget(git_repo: Path, cfg, tmp_path: Path, monkeypatch) -> None:
+    """未指定预算时单步与总体都取 600s，不被仓侧 scoped 档提前截断。"""
+    _remote(git_repo, tmp_path)
+    _commit(git_repo, "docs/项目/记录.md")
+    captured: dict[str, object] = {}
+
+    def fake_preflight(*args, **kwargs):
+        captured.update(kwargs)
+        return 0
+
+    monkeypatch.setattr(preflight, "run_preflight", fake_preflight)
+    assert push.run_push(cfg, jobs="auto") == 0
+    assert captured["step_seconds"] == 600.0
+    assert captured["budget_seconds"] == 600.0
+    assert captured["wall_started"] is not None

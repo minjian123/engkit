@@ -175,13 +175,17 @@ def run_push(
         budget_seconds if budget_seconds is not None else preflight.PUSH_MAX_TOTAL_SECONDS,
         preflight.PUSH_MAX_TOTAL_SECONDS,
     )
+    effective_step = min(
+        step_seconds if step_seconds is not None else preflight.PUSH_MAX_TOTAL_SECONDS,
+        preflight.PUSH_MAX_TOTAL_SECONDS,
+    )
     code = preflight.run_preflight(
         cfg,
         mode=mode,
         jobs=jobs,
         no_cov=False,
         no_scope=False,
-        step_seconds=step_seconds,
+        step_seconds=effective_step,
         budget_seconds=effective_budget,
         from_push=True,
         wall_started=started,

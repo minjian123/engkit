@@ -975,8 +975,9 @@ def run_selected(
     data_file = (cfg.root / cfg.coverage.data_file).resolve()
     report = (cfg.root / report_path).resolve() if report_path else coverage.report_path(data_file)
     env = _coverage_env(cfg, cov_modules, workdir) if cov_enabled else dict(os.environ)
-    if allow_full:
-        # 内部标记：推送入口 / CI 授权本次跑全量（开发环不设，pytest 守卫据此拦截）
+    if allow_full or offload_to_ci:
+        # 内部标记：推送入口 / CI 的内部命令授权。分层归位下仍会定向选中 full_test_dirs 下的
+        # 集成用例（折叠成目录时守卫会误判为全量）；本标记只放行内部命令，不打开任何退化分支。
         env[guard.FULL_AUTH_ENV] = "1"
     if cov_enabled:
         out(f"[test-selection] 覆盖率采集：{data_file}（source={env[cfg.coverage.source_env]}）")
