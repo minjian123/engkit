@@ -194,7 +194,7 @@ def run(cfg: Config, *, metrics_url: str, out_path: str, fail_on_violation: bool
     if out_path:
         target = Path(out_path)
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        target.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8", newline="\n")
         out(f"已写入 JSON：{out_path}")
     if fail_on_violation and summary["boundary_violations"]:
         return 1

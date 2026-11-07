@@ -433,7 +433,8 @@ def write_baseline(path: Path, hits: list[Hit], rule: BareCollectionsRules) -> N
     ]
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {"version": rule.baseline_version, "generated_at": date.today().isoformat(), "entries": entries}
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    # 基线是入库产物：显式 LF，避免 Windows 默认 CRLF 把整文件写进下一轮提交
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8", newline="\n")
 
 
 def summarize(hits: list[Hit], outcome: Outcome) -> None:

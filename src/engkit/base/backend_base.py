@@ -799,7 +799,8 @@ def write_direct_baseline(cfg: Config, rule: BackendBaseRules) -> int:
         "version": 1,
         "entries": [{"file": rel, "class": name} for rel, name in entries],
     }
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    # 基线是入库产物：显式 LF（Windows 默认 CRLF 会把整文件写进下一轮提交）
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8", newline="\n")
     return len(entries)
 
 
