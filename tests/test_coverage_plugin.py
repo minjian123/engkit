@@ -63,8 +63,23 @@ def test_start_without_data_env(monkeypatch, repo: Path) -> None:
     assert coverage_plugin.start() is None
 
 
+def test_shard_suffix_unique_and_numeric(monkeypatch) -> None:
+    """分片后缀纯数字且跨批次唯一：PID 复用也不会覆盖既有分片。"""
+    clock = {"ns": 1_700_000_000_000_000_000}
+    monkeypatch.setattr(coverage_plugin, "time", types.SimpleNamespace(time_ns=lambda: clock["ns"]))
+    monkeypatch.setattr(coverage_plugin, "os", types.SimpleNamespace(getpid=lambda: 4242))
+    first = coverage_plugin._shard_suffix()
+    assert first.isascii() and first.isdigit() and first.startswith("4242")
+    # 同一 PID（进程退出后被复用）但采集时刻不同 ⇒ 不撞名
+    clock["ns"] += 1
+    assert coverage_plugin._shard_suffix() != first
+    # 不同 PID 同样不撞名
+    monkeypatch.setattr(coverage_plugin, "os", types.SimpleNamespace(getpid=lambda: 9999))
+    assert coverage_plugin._shard_suffix() != first
+
+
 def test_start_collects(monkeypatch, repo: Path, tmp_path: Path) -> None:
-    """注入采集变量后按进程号与采集范围启动（行 + 分支）；落点目录不存在时自动创建。"""
+    """注入采集变量后按唯一后缀与采集范围启动（行 + 分支）；落点目录不存在时自动创建。"""
     store: list[_FakeCoverage] = []
     monkeypatch.setitem(sys.modules, "coverage", _fake_module(store))
     monkeypatch.chdir(repo)
@@ -73,7 +88,9 @@ def test_start_collects(monkeypatch, repo: Path, tmp_path: Path) -> None:
     monkeypatch.setenv("ENGKIT_COVERAGE_SOURCE", "pkg_a, svc")
     instance = coverage_plugin.start()
     assert instance is not None and instance.started == 1
-    assert instance.kwargs["data_suffix"] == f"{os.getpid()}"
+    suffix = instance.kwargs["data_suffix"]
+    assert isinstance(suffix, str) and suffix.isascii() and suffix.isdigit()
+    assert suffix.startswith(f"{os.getpid()}")
     assert instance.kwargs["branch"] is True
     assert instance.kwargs["source"] == ("pkg_a", "svc")
     assert data_file.parent.is_dir()

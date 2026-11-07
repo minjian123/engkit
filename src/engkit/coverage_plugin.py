@@ -9,8 +9,8 @@
 - 采集启动只需要配置里的两个**环境变量名**（`[coverage].data_env` / `source_env`），故此处用
   `tomllib` 直读 `engkit.toml` 的该段，不走 `engkit.config` 的完整解析——完整校验仍由 `Config`
   负责，这里只做「够启动采集」的最小读取；
-- 导入即按环境变量启动采集（按进程号落盘，`engkit coverage` 合并判定）；未配置采集（环境变量
-  缺省）或定位不到配置时静默不采（不影响正常跑测试）；
+- 导入即按环境变量启动采集（按**全局唯一纯数字后缀**落盘，`engkit coverage` 合并判定）；未配置
+  采集（环境变量缺省）或定位不到配置时静默不采（不影响正常跑测试）；
 - `guard` / `engkit.coverage` 等内部模块一律**延迟导入**（在 `pytest_configure` 等钩子里），
   避免把被测模块拉到采集启动之前——`engkit` 自举时插件属于被测包，提前导入会直接污染自身覆盖率
   （2026-11-05 #1597 实测：`addopts` 加载插件后自举覆盖率从 100% 跌到 91.71%）。
@@ -21,6 +21,7 @@ from __future__ import annotations
 import atexit
 import contextlib
 import os
+import time
 import tomllib
 from pathlib import Path
 from typing import Any
@@ -100,8 +101,23 @@ def start() -> Any:
     return instance
 
 
+def _shard_suffix() -> str:
+    """生成采集分片后缀：纯数字、跨进程与跨批次全局唯一。
+
+    历史口径是 `os.getpid()`。推送环把数百个测试文件拆成多批、每批多个 xdist worker，前一批
+    进程退出后 PID 会被复用，同 PID 的新分片会覆盖旧分片，`engkit coverage` 合并时便丢掉那部分
+    覆盖数据（2026-11-07 实测：同一批用例串行跑全覆盖，并行分批跑却报缺 15 行，且缺行随批次波动）。
+    改为「PID + 纳秒时间戳」后，即使 PID 复用也不会撞名；纯数字后缀仍满足
+    `engkit.coverage.data_files()` 的 `isdigit()` 判定，合并逻辑无需改动。
+
+    Returns:
+        str: 十进制纯数字后缀。
+    """
+    return f"{os.getpid()}{time.time_ns():019d}"
+
+
 def _new_coverage(data_file: str, source: tuple[str, ...]) -> Any:
-    """构造 coverage 实例（行 + 分支、按进程号落盘）。
+    """构造 coverage 实例（行 + 分支、按唯一后缀落盘）。
 
     Args:
         data_file: 数据文件基址（由 `[coverage].data_env` 指向）。
@@ -116,8 +132,10 @@ def _new_coverage(data_file: str, source: tuple[str, ...]) -> Any:
         return None
     # 与 `engkit.coverage.ensure_data_dir` 同语义；此处内联，避免采集启动前导入被测模块
     Path(data_file).parent.mkdir(parents=True, exist_ok=True)
-    # 后缀固定为进程号：xdist worker 各写一份，合并时按文件名唯一（`data_suffix=True` 的随机后缀会撞名）
-    return coverage.Coverage(data_file=data_file, data_suffix=f"{os.getpid()}", branch=True, source=source or None)
+    # coverage 为可选依赖且无类型存根，动态属性检查在此不适用（与改动前同一形态）。
+    return coverage.Coverage(  # pyright: ignore[reportAttributeAccessIssue]
+        data_file=data_file, data_suffix=_shard_suffix(), branch=True, source=source or None
+    )
 
 
 def stop() -> None:
