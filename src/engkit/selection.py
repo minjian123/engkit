@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import ast
 import json
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -413,6 +414,121 @@ def build_graph(cfg: Config, *, depth: str = "") -> Graph:
             test_deps[rel] = frozenset(closure)
 
     return Graph(projects=tuple(projects), test_files=test_files, test_deps=test_deps)
+
+
+@dataclass(frozen=True)
+class ReverseScope:
+    """静态检查的文件范围（改动文件 ∪ 反向依赖者）。
+
+    Attributes:
+        files: 仓根相对文件清单。
+        degraded: 是否退化为全仓。
+        reason: 退化原因（未退化时为空串）。
+    """
+
+    files: tuple[str, ...]
+    degraded: bool
+    reason: str = ""
+
+
+def reverse_scope(cfg: Config, changed: Sequence[str]) -> ReverseScope:
+    """推导「改动文件 + 反向依赖者」（推送环静态检查的收敛范围）。
+
+    反向边是「谁导入了它」：被改动的基础模块会波及所有上层调用方，只看正向依赖会漏判。
+    全局变更、闭包接近全仓、改动文件不在已登记工程内，一律退化为全仓并给出原因（不静默）。
+
+    Args:
+        cfg: 仓配置。
+        changed: 改动路径（仓根相对）。
+
+    Returns:
+        ReverseScope: 范围与退化结论。
+    """
+    if cfg.backend is None:
+        return ReverseScope(files=(), degraded=True, reason="未配置 `[backend]`")
+    _, root, _, _ = _backend_meta(cfg)
+    projects = discover_projects(cfg)
+    if not projects:
+        return ReverseScope(files=(), degraded=True, reason="未发现任何后端工程")
+    for rel in changed:
+        if is_global_change(rel, cfg):
+            return ReverseScope(files=(), degraded=True, reason=f"全局变更：{rel}")
+    module_of: dict[str, str] = {}
+    imports: dict[str, set[str]] = {}
+    for project in projects:
+        for path in _iter_py(root / project.src):
+            rel = path.relative_to(root).as_posix()
+            module = module_of_source(rel, project)
+            if not module:
+                continue
+            module_of[module] = rel
+            imports[module] = parse_imports(path, module)
+    seeds: set[str] = set()
+    for rel in changed:
+        if not rel.endswith(".py"):
+            continue
+        for project in projects:
+            module = module_of_source(rel, project)
+            if module:
+                seeds.add(module)
+                break
+        else:
+            return ReverseScope(files=(), degraded=True, reason=f"改动文件不在已登记工程内：{rel}")
+    if not seeds:
+        return ReverseScope(files=(), degraded=True, reason="本次改动不含后端源码")
+    dependents = _reverse_edges(imports)
+    closure = set(seeds)
+    frontier = list(seeds)
+    while frontier:
+        current = frontier.pop()
+        for parent in dependents.get(current, set()):
+            if parent not in closure:
+                closure.add(parent)
+                frontier.append(parent)
+    files = {module_of[module] for module in closure if module in module_of}
+    total = len(module_of)
+    if total and len(files) >= max(1, int(total * cfg.base_ratio)):
+        return ReverseScope(files=(), degraded=True, reason=f"闭包规模接近全仓（{len(files)}/{total}）")
+    return ReverseScope(files=tuple(sorted(files)), degraded=False)
+
+
+def _reverse_edges(imports: dict[str, set[str]]) -> dict[str, set[str]]:
+    """把「模块 → 直接导入」反转成「模块 → 直接导入它的模块」。
+
+    导入项可能是 `A.b` 形态（`from A import b`），需上溯到真实模块名再连边。
+
+    Args:
+        imports: 模块 → 直接导入集合。
+
+    Returns:
+        dict[str, set[str]]: 反向边。
+    """
+    edges: dict[str, set[str]] = {}
+    for module, deps in imports.items():
+        for dep in deps:
+            target = _existing_prefix(dep, imports)
+            if target is None:
+                continue
+            edges.setdefault(target, set()).add(module)
+    return edges
+
+
+def _existing_prefix(dep: str, imports: dict[str, set[str]]) -> str | None:
+    """把导入项收敛到已存在的模块名（逐级去掉末段）。
+
+    Args:
+        dep: 导入项（如 `a.b.c`）。
+        imports: 模块表。
+
+    Returns:
+        str | None: 命中模块名；无命中返回 None。
+    """
+    parts = dep.split(".")
+    for end in range(len(parts), 0, -1):
+        candidate = ".".join(parts[:end])
+        if candidate in imports:
+            return candidate
+    return None
 
 
 def _isomorphic_candidates(backend: Path, rel: str, project: Project, test_prefix: str) -> tuple[str, ...]:

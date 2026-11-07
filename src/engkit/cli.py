@@ -1,23 +1,35 @@
 """命令行入口：`engkit <子命令>`。
 
 子命令：`links` / `docs-scope` / `selection` / `run-selected` / `run-changed` / `coverage` /
-`preflight` / `guard` / `kiwi`。各仓的既有入口脚本只做转发，参数与退出码保持不变。
+`preflight` / `guard` / `checks` / `eol` / `kiwi`。各仓的既有入口脚本只做转发，参数与退出码保持不变。
 """
 
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import json
 import sys
 from pathlib import Path
 
-from . import coverage, devloop, docs_links, docs_scope, eol, gitutil, guard, kiwi, preflight, push, selection
+from . import (
+    checks,
+    coverage,
+    devloop,
+    docs_links,
+    docs_scope,
+    eol,
+    gitutil,
+    guard,
+    kiwi,
+    preflight,
+    push,
+    selection,
+)
 from .base import scan_scope
 from .config import CONFIG_NAME, Config, ConfigError, load_for
 from .console import configure_stdio, error, out
-
-VERSION = "0.4.0"
-"""包版本。"""
+from .version import VERSION
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -140,6 +152,9 @@ def _build_parser() -> argparse.ArgumentParser:
     eol_parser = subparsers.add_parser("eol", parents=[common], help="行尾护栏（工作树 CRLF 检查）")
     eol_parser.add_argument("--quiet", action="store_true", help="只打印结论行")
     eol_parser.add_argument("--fix", action="store_true", help="就地修正为 LF（写回工作树）")
+
+    checks_parser = subparsers.add_parser("checks", parents=[common], help="护栏检查（单进程 runner）")
+    checks_parser.add_argument("--only", action="append", default=[], help="只跑这些标签（可重复）")
 
     kiwi_parser = subparsers.add_parser("kiwi", parents=[common], help="Kiwi TCMS 用例登记与回读")
     kiwi_actions = kiwi_parser.add_subparsers(dest="action", required=True)
@@ -666,6 +681,26 @@ def _cmd_guard(args: argparse.Namespace) -> int:
     return guard.remove_hook(found)
 
 
+def _cmd_checks(args: argparse.Namespace) -> int:
+    """执行护栏检查（单进程 runner；命令占位符在此展开）。
+
+    Args:
+        args: 解析结果。
+
+    Returns:
+        int: 退出码（0 全通过 / 1 有失败）。
+    """
+    cfg = _load(args)
+    entries = [
+        dataclasses.replace(entry, cmd=tuple(preflight.expand(cfg, entry.cmd))) for entry in cfg.preflight.self_tests
+    ]
+    if not entries:
+        out("[checks] 未登记任何检查（`[[preflight.self_tests]]` 为空）")
+        return 0
+    failures = checks.run_batch(cfg, entries, only=tuple(str(item) for item in args.only))
+    return 1 if failures else 0
+
+
 def _cmd_eol(args: argparse.Namespace) -> int:
     """执行行尾检查（可选就地修正）。
 
@@ -837,6 +872,7 @@ _HANDLERS = {
     "push": _cmd_push,
     "guard": _cmd_guard,
     "eol": _cmd_eol,
+    "checks": _cmd_checks,
     "kiwi": _cmd_kiwi,
 }
 """子命令 → 处理函数。"""

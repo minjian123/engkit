@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import os
 import re
 import shlex
@@ -18,7 +19,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from . import coverage, gitutil, guard, preflight_gate, selection
+from . import checks, coverage, gitutil, guard, preflight_gate, selection, steps_reuse
 from .config import Config, SelfTest, Step
 from .console import finish, note, out, section
 
@@ -336,6 +337,125 @@ def _elapsed(started: float) -> str:
     return f"{time.monotonic() - started:.1f}s"
 
 
+def _run_reused(
+    cfg: Config,
+    label: str,
+    argv: list[str],
+    declared: tuple[str, ...],
+    changed: list[str],
+    cwd: Path,
+    budget: Budget,
+    failures: list[str],
+    *,
+    optional: bool = False,
+) -> None:
+    """执行一条命令步骤：先查复用，未命中才真跑（按结论写 / 删记录）。
+
+    复用判定全部在 `steps_reuse`：此处只负责「命中即跳过、未命中即执行」的编排。
+    任何复用侧异常都表现为「未命中」，即回退真跑（fail-open 到执行）。
+
+    Args:
+        cfg: 仓配置。
+        label: 步骤标签。
+        argv: 已展开占位符的命令。
+        declared: 显式输入前缀（空表示按命令形态推断）。
+        changed: 当次改动文件。
+        cwd: 工作目录。
+        budget: 预算护栏。
+        failures: 失败收集列表。
+        optional: 命令缺失时是否只跳过、不计失败。
+    """
+    key = steps_reuse.key_for(cfg, argv, declared, changed)
+    if key is not None:
+        hit = steps_reuse.lookup(cfg, key)
+        if hit is not None:
+            out(f"\n[engkit] {label}\n  复用（上次通过于 {hit.passed_at}，耗时 {hit.duration:.1f}s；命令与输入未变）")
+            return
+    started = time.monotonic()
+    ok = execute(label, argv, cwd, budget, failures, optional=optional)
+    if key is None:
+        return
+    if ok:
+        steps_reuse.record(cfg, key, label, time.monotonic() - started)
+    else:
+        steps_reuse.forget(cfg, key)
+
+
+def _execute_step(cfg: Config, step: Step, changed: list[str], budget: Budget, failures: list[str]) -> None:
+    """执行一个 `command` 步骤（含范围收敛与结果复用）。
+
+    Args:
+        cfg: 仓配置。
+        step: 步骤。
+        changed: 当次改动文件。
+        budget: 预算护栏。
+        failures: 失败收集列表。
+    """
+    argv = _apply_scope(cfg, step, expand(cfg, step.cmd), changed)
+    _run_reused(
+        cfg,
+        step.label,
+        argv,
+        step.inputs,
+        changed,
+        _resolve_cwd(cfg, step.cwd),
+        budget,
+        failures,
+        optional=step.optional,
+    )
+
+
+def _apply_scope(cfg: Config, step: Step, argv: list[str], changed: list[str]) -> list[str]:
+    """按步骤 `scope` 收敛检查范围。
+
+    `changed-closure` 把命令中的仓根路径参数替换为「改动文件 + 反向依赖者」清单；
+    任何退化（全局变更 / 闭包接近全仓 / 清单超命令行预算 / 闭包为空）都原样执行并打印原因。
+
+    Args:
+        cfg: 仓配置。
+        step: 步骤。
+        argv: 已展开占位符的命令。
+        changed: 当次改动文件。
+
+    Returns:
+        list[str]: 实际执行的命令。
+    """
+    if step.scope != "changed-closure":
+        return argv
+    scope = selection.reverse_scope(cfg, changed)
+    if scope.degraded:
+        out(f"  静态范围退化：全仓（原因：{scope.reason}）")
+        return argv
+    if not scope.files:
+        out("  静态范围退化：全仓（原因：闭包为空）")
+        return argv
+    joined = " ".join(scope.files)
+    if len(joined) > DEFAULT_ARGV_BUDGET:
+        out(f"  静态范围退化：全仓（原因：闭包清单 {len(joined)} 字符超出命令行预算 {DEFAULT_ARGV_BUDGET}）")
+        return argv
+    out(f"  静态范围：{len(scope.files)} 个文件（改动文件 + 反向依赖）")
+    return _replace_root_path(cfg, argv, list(scope.files))
+
+
+def _replace_root_path(cfg: Config, argv: list[str], files: list[str]) -> list[str]:
+    """把命令里的仓根路径参数替换为文件清单（没有该参数时追加到末尾）。
+
+    Args:
+        cfg: 仓配置。
+        argv: 命令。
+        files: 文件清单。
+
+    Returns:
+        list[str]: 新命令。
+    """
+    root = str(cfg.root).rstrip("/")
+    for index in range(len(argv) - 1, -1, -1):
+        token = argv[index].rstrip("/")
+        if token == "." or token == root:
+            return [*argv[:index], *files, *argv[index + 1 :]]
+    return [*argv, *files]
+
+
 def _pump(process: subprocess.Popen[str], collected: list[str]) -> None:
     """逐行透传子进程输出并收集。
 
@@ -403,11 +523,19 @@ def run_self_tests(
         out(f"\n[engkit] 护栏自测：全跑（--{mode} 档保留全跑口径）")
     elif not reliable:
         out("\n[engkit] 护栏自测：变更不可判定 ⇒ 全跑（不静默跳过）")
+    picked: list[SelfTest] = []
     for entry in cfg.preflight.self_tests:
         if not (force_all or not reliable or _self_test_selected(entry, changes)):
             out(f"\n[engkit] {entry.label}\n  跳过（变更未触及其依赖）")
             continue
-        execute(entry.label, expand(cfg, entry.cmd), cfg.root, budget, failures)
+        picked.append(dataclasses.replace(entry, cmd=tuple(expand(cfg, entry.cmd))))
+    if not picked:
+        return
+    if cfg.preflight.checks_runner == "single":
+        failures.extend(checks.run_batch(cfg, picked, changed=changes))
+        return
+    for entry in picked:
+        _run_reused(cfg, entry.label, list(entry.cmd), entry.deps, changes, cfg.root, budget, failures)
 
 
 def _coverage_env(cfg: Config, modules: list[str], cwd: Path) -> dict[str, str]:
@@ -1054,6 +1182,14 @@ def run_preflight(
     )
     out(f"[engkit] {describe_jobs(jobs)}")
     failures: list[str] = []
+    changes, _ = _changes(cfg)
+    if cfg.preflight.reuse:
+        out(
+            f"[engkit] 步骤结果复用：开启（记录 {cfg.preflight.reuse_file}；"
+            f"过期 {cfg.preflight.reuse_ttl_days} 天；命中即跳过，未命中 / 异常一律真跑）"
+        )
+    else:
+        out("[engkit] 步骤结果复用：关闭（全部真跑）")
     for step in cfg.preflight.steps:
         if not step_applies(step, mode):
             continue
@@ -1061,7 +1197,6 @@ def run_preflight(
             if mode == "full" and guard.is_ci():
                 # CI 全量档只跑全量用例，避免与定向档重复
                 continue
-            changes, _ = _changes(cfg)
             _run_scoped_step(cfg, budget, failures, jobs=jobs, no_cov=no_cov, changes=changes)
             continue
         if step.type == "full_tests":
@@ -1071,14 +1206,7 @@ def run_preflight(
             if not no_scope:
                 run_project_tests(cfg, budget, failures, jobs=jobs)
             continue
-        execute(
-            step.label,
-            expand(cfg, step.cmd),
-            _resolve_cwd(cfg, step.cwd),
-            budget,
-            failures,
-            optional=step.optional,
-        )
+        _execute_step(cfg, step, changes, budget, failures)
     run_self_tests(cfg, budget, failures, force_all=mode in ("fast", "full"), mode=mode)
     if budget.exhausted:
         out("\n[engkit] 提示：预算护栏已中止剩余步骤 —— 全量与集成交 CI（推送后按需触发流水线）。")

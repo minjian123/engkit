@@ -9,6 +9,9 @@ root = "engkit文档"
 
 [docs.scope]
 whitelist_dirs = ["规范/", "概述/", "资料/"]
+# 专项计划目录：`项目/<域>/<专项>/计划.md` 是进度类字段（工时 / 排期 / 甘特）的唯一允许落点，
+# 与 bms 阶段计划同口径；项目下其余文档（需求 / 设计 / 记录）不豁免，仍受进度字段护栏约束。
+plan_dir_pattern = '^项目/[^/]+/[^/]+/计划\.md$'
 
 [pytest]
 cmd = "uv run pytest"

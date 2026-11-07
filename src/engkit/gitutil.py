@@ -178,6 +178,43 @@ def current_branch(root: Path) -> str:
     return "" if name == "HEAD" else name
 
 
+def tree_hash(root: Path) -> str | None:
+    """取「索引内容」的根树哈希（`git write-tree`）。
+
+    提交钩子触发时索引就是待提交内容，故不能用 `HEAD`（那会把新内容误判成旧内容）。
+    工作树干净时索引与 `HEAD` 等价；索引不可写（存在未合并项）时返回 None，调用方据此不命中。
+
+    Args:
+        root: 仓库根目录。
+
+    Returns:
+        str | None: 根树哈希；不可取时返回 None。
+    """
+    result = _run(root, ["write-tree"])
+    if result is None or result.returncode != 0:
+        return None
+    value = result.stdout.strip()
+    return value or None
+
+
+def object_hash(root: Path, tree: str, rel: str) -> str | None:
+    """取指定树内某路径的对象哈希（目录得子树、文件得 blob）。
+
+    Args:
+        root: 仓库根目录。
+        tree: 根树哈希（`tree_hash` 的返回值）。
+        rel: 相对仓库根的路径（目录前缀或单文件）。
+
+    Returns:
+        str | None: 对象哈希；路径不存在或不可解析时返回 None。
+    """
+    result = _run(root, ["rev-parse", "--verify", "--quiet", f"{tree}:{rel}"])
+    if result is None or result.returncode != 0:
+        return None
+    value = result.stdout.strip()
+    return value or None
+
+
 def fingerprint(root: Path) -> str:
     """计算工作区指纹：`HEAD` + 全部变更文件内容哈希。
 

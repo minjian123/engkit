@@ -209,6 +209,8 @@ class Step:
         cwd: 工作目录（相对仓根；空串取预检缺省）。
         preset: 生效档位（`always` / `scoped` / `fast` / `full`）。
         optional: 命令缺失时是否只跳过、不计失败。
+        inputs: 步骤结果复用的输入集（仓根相对路径前缀 / 单文件；空表示按命令形态推断）。
+        scope: 检查范围（`full` 原样执行 / `changed-closure` 改判改动文件 + 反向依赖闭包）。
     """
 
     label: str
@@ -217,6 +219,8 @@ class Step:
     cwd: str = ""
     preset: str = "always"
     optional: bool = False
+    inputs: tuple[str, ...] = ()
+    scope: str = "full"
 
 
 @dataclass(frozen=True)
@@ -271,6 +275,10 @@ class PreflightConfig:
         gate: 场景闸门与调用审计。
         steps: 步骤（按声明序执行）。
         self_tests: 护栏自测。
+        reuse: 步骤结果复用总开关（关闭时全部真跑）。
+        reuse_file: 复用记录落点（相对仓根）。
+        reuse_ttl_days: 复用记录过期天数。
+        checks_runner: 护栏执行模式（`single` 单进程 / `process` 逐条子进程）。
     """
 
     cwd: str = "."
@@ -279,6 +287,10 @@ class PreflightConfig:
     gate: PreflightGateConfig = field(default_factory=PreflightGateConfig)
     steps: tuple[Step, ...] = ()
     self_tests: tuple[SelfTest, ...] = ()
+    reuse: bool = True
+    reuse_file: str = ".cache/preflight/steps.json"
+    reuse_ttl_days: int = 7
+    checks_runner: str = "single"
 
 
 @dataclass(frozen=True)
@@ -1233,13 +1245,16 @@ def _parse_steps(table: dict[str, Any], where: str) -> tuple[Step, ...]:
     steps: list[Step] = []
     for index, item in enumerate(_tables(table, "steps", where)):
         item_where = f"{where}.steps[{index}]"
-        _check_keys(item, ("label", "type", "cmd", "cwd", "preset", "optional"), item_where)
+        _check_keys(item, ("label", "type", "cmd", "cwd", "preset", "optional", "inputs", "scope"), item_where)
         kind = _string(item, "type", item_where, "command")
         if kind not in ("command", "scoped_tests", "full_tests", "project_tests"):
             raise _fail(item_where, f"`type` 非法：{kind}")
         preset = _string(item, "preset", item_where, "always")
         if preset not in ("always", "scoped", "fast", "full"):
             raise _fail(item_where, f"`preset` 非法：{preset}")
+        scope = _string(item, "scope", item_where, "full")
+        if scope not in ("full", "changed-closure"):
+            raise _fail(item_where, f"`scope` 非法：{scope}")
         command = _strings(item, "cmd", item_where)
         if kind == "command" and not command:
             raise _fail(item_where, "`command` 类型需给出 `cmd`")
@@ -1251,6 +1266,8 @@ def _parse_steps(table: dict[str, Any], where: str) -> tuple[Step, ...]:
                 cwd=_string(item, "cwd", item_where, ""),
                 preset=preset,
                 optional=bool(_scalar(item, "optional", item_where, bool, False)),
+                inputs=_strings(item, "inputs", item_where),
+                scope=scope,
             )
         )
     return tuple(steps)
@@ -2127,11 +2144,29 @@ def parse(raw: dict[str, Any], path: Path) -> Config:
     )
 
     preflight_table = _table(raw, "preflight", "preflight")
-    _check_keys(preflight_table, ("cwd", "since", "budget", "gate", "steps", "self_tests"), "preflight")
+    _check_keys(
+        preflight_table,
+        (
+            "cwd",
+            "since",
+            "budget",
+            "gate",
+            "steps",
+            "self_tests",
+            "reuse",
+            "reuse_file",
+            "reuse_ttl_days",
+            "checks_runner",
+        ),
+        "preflight",
+    )
     budget_table = _table(preflight_table, "budget", "preflight.budget")
     _check_keys(budget_table, ("scoped", "full"), "preflight.budget")
     gate_table = _table(preflight_table, "gate", "preflight.gate")
     _check_keys(gate_table, ("dirty_tree", "audit_file"), "preflight.gate")
+    checks_runner = _string(preflight_table, "checks_runner", "preflight", "single")
+    if checks_runner not in ("single", "process"):
+        raise _fail("preflight", f"`checks_runner` 非法：{checks_runner}")
     preflight_config = PreflightConfig(
         cwd=_string(preflight_table, "cwd", "preflight", "."),
         since=_string(preflight_table, "since", "preflight", "origin/main"),
@@ -2145,6 +2180,10 @@ def parse(raw: dict[str, Any], path: Path) -> Config:
         ),
         steps=_parse_steps(preflight_table, "preflight"),
         self_tests=_parse_self_tests(preflight_table, "preflight"),
+        reuse=bool(_scalar(preflight_table, "reuse", "preflight", bool, True)),
+        reuse_file=_string(preflight_table, "reuse_file", "preflight", ".cache/preflight/steps.json"),
+        reuse_ttl_days=int(_scalar(preflight_table, "reuse_ttl_days", "preflight", int, 7)),
+        checks_runner=checks_runner,
     )
 
     push_table = _table(raw, "push", "push")
