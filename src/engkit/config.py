@@ -1502,7 +1502,7 @@ def _parse_backend_base_rules(table: dict[str, Any], where: str) -> BackendBaseR
     if segment and not (len(segment) == 2 and segment.isdigit()):
         raise _fail(where, "`error_code_segment` 应为 2 位数字（产品码段位）")
     if profile == "product" and not segment:
-        raise _fail(where, "`profile = \"product\"` 须同时登记 `error_code_segment`（2 位段位）")
+        raise _fail(where, '`profile = "product"` 须同时登记 `error_code_segment`（2 位段位）')
     return BackendBaseRules(
         manifest=_string(table, "manifest", where),
         chain_doc=_string(table, "chain_doc", where),
