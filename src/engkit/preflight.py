@@ -280,6 +280,7 @@ def execute(
         return False
     limit = min(timeout, remaining) if timeout is not None else min(budget.step_seconds, remaining)
     out(f"\n[engkit] {label}\n  $ {' '.join(argv)}")
+    started = time.monotonic()
     try:
         process = subprocess.Popen(
             argv,
@@ -294,10 +295,10 @@ def execute(
         )
     except FileNotFoundError:
         if optional:
-            note(f"跳过（未安装：{argv[0]}）")
+            note(f"跳过（未安装：{argv[0]}；{_elapsed(started)}）")
             return True
         failures.append(f"{label}（命令不存在：{argv[0]}）")
-        note(f"失败（命令不存在：{argv[0]}）")
+        note(f"失败（命令不存在：{argv[0]}；{_elapsed(started)}）")
         return False
 
     collected: list[str] = []
@@ -310,17 +311,29 @@ def execute(
         process.wait()
         reader.join(timeout=5)
         failures.append(f"预算护栏（单步超时 {limit:.0f}s）：{label}")
-        note(f"超时中止（{limit:.0f}s）")
+        note(f"超时中止（{limit:.0f}s；已耗时 {_elapsed(started)}）")
         return False
     reader.join()
     if capture is not None:
         capture.extend(collected)
     if returncode != 0:
         failures.append(label)
-        note(f"失败（退出码 {returncode}）")
+        note(f"失败（退出码 {returncode}；{_elapsed(started)}）")
         return False
-    note("通过")
+    note(f"通过（{_elapsed(started)}）")
     return True
+
+
+def _elapsed(started: float) -> str:
+    """把起点时刻换算成「已耗时」文本（步骤耗时可见，供定位推送环慢步骤）。
+
+    Args:
+        started: `time.monotonic()` 起点。
+
+    Returns:
+        str: 形如 `1.2s` 的耗时文本。
+    """
+    return f"{time.monotonic() - started:.1f}s"
 
 
 def _pump(process: subprocess.Popen[str], collected: list[str]) -> None:
