@@ -158,6 +158,7 @@ def _build_parser() -> argparse.ArgumentParser:
     eol_parser.add_argument("--quiet", action="store_true", help="只打印结论行")
     eol_parser.add_argument("--fix", action="store_true", help="就地修正为 LF（写回工作树）")
     eol_parser.add_argument("--fix-staged", action="store_true", help="只修正已暂存文件并重新暂存（提交钩子用）")
+    eol_parser.add_argument("--strict", action="store_true", help="工作树 CRLF 按失败处理（缺省仅告警）")
 
     checks_parser = subparsers.add_parser("checks", parents=[common], help="护栏检查（单进程 runner）")
     checks_parser.add_argument("--only", action="append", default=[], help="只跑这些标签（可重复）")
@@ -744,8 +745,13 @@ def _cmd_eol(args: argparse.Namespace) -> int:
             error(f"...（其余 {len(report.findings) - 50} 个从略）")
     if report.findings:
         if not args.quiet:
-            error("改用 LF 保存：编辑器设 files.eol，脚本写文件显式指定 newline；或执行 engkit eol --fix")
-        return 1
+            if args.strict:
+                error("--strict：行尾违规按失败处理；改用 LF 保存或执行 engkit eol --fix")
+            else:
+                error(
+                    "告警（不阻断）：入库内容已由 .gitattributes 归一为 LF；要工作树字节也干净就执行 engkit eol --fix"
+                )
+        return 1 if args.strict else 0
     return 0
 
 

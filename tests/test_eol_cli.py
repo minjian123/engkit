@@ -75,16 +75,25 @@ def test_eol_ok(eol_repo: Path, capsys: pytest.CaptureFixture[str]) -> None:
 
 
 def test_eol_violation(eol_repo: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    """残留 CRLF 返回 1 并列出文件。"""
+    """残留 CRLF 只告警（返回 0）并列出文件：入库内容已由 gitattributes 归一。"""
     (eol_repo / "bad.md").write_bytes(b"# bad\r\n")
-    assert cli.main(["eol", "--root", str(eol_repo)]) == 1
-    assert "bad.md" in capsys.readouterr().err
+    assert cli.main(["eol", "--root", str(eol_repo)]) == 0
+    captured = capsys.readouterr()
+    assert "bad.md" in captured.err
+    assert "告警（不阻断）" in captured.err
+
+
+def test_eol_strict_violation(eol_repo: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """`--strict` 时把工作树 CRLF 按失败处理（返回 1）。"""
+    (eol_repo / "bad.md").write_bytes(b"# bad\r\n")
+    assert cli.main(["eol", "--root", str(eol_repo), "--strict"]) == 1
+    assert "--strict" in capsys.readouterr().err
 
 
 def test_eol_quiet(eol_repo: Path, capsys: pytest.CaptureFixture[str]) -> None:
     """--quiet 只打印结论行。"""
     (eol_repo / "bad.md").write_bytes(b"# bad\r\n")
-    assert cli.main(["eol", "--root", str(eol_repo), "--quiet"]) == 1
+    assert cli.main(["eol", "--root", str(eol_repo), "--quiet"]) == 0
     captured = capsys.readouterr()
     assert captured.err == ""
     assert "行尾违规 1 个" in captured.out
@@ -128,7 +137,7 @@ def test_eol_truncates_long_list(eol_repo: Path, capsys: pytest.CaptureFixture[s
     original = cli_mod.eol.check
     cli_mod.eol.check = lambda root, cfg: monkeypatch_result  # type: ignore[assignment]
     try:
-        assert cli_mod.main(["eol", "--root", str(eol_repo)]) == 1
+        assert cli_mod.main(["eol", "--root", str(eol_repo), "--strict"]) == 1
     finally:
         cli_mod.eol.check = original  # type: ignore[assignment]
     captured = capsys.readouterr()
