@@ -213,3 +213,51 @@ def normalize(root: Path, report: EolReport) -> list[str]:
         path.write_bytes(data.replace(CRLF, b"\n"))
         fixed.append(item.file)
     return fixed
+
+
+def staged_files(root: Path) -> list[str]:
+    """取暂存区新增 / 修改的文件（相对仓根 posix 路径）。
+
+    Args:
+        root: 仓库根目录。
+
+    Returns:
+        list[str]: 路径清单（无 git 或命令失败时为空）。
+    """
+    result = _git(root, ["diff", "--cached", "--name-only", "--diff-filter=ACM"])
+    if result is None or result.returncode != 0:
+        return []
+    return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+
+
+def fix_staged(root: Path, cfg: EolConfig) -> list[str]:
+    """把**已暂存**文件的工作树字节改成 LF，并重新暂存（提交钩子用）。
+
+    为什么需要：写侧默认值控制不住（Windows 上 `Path.write_text` / `Set-Content` / 各类编辑器
+    都可能产 CRLF），但「进入提交的内容」必须恒为 LF。`.gitattributes` 的 clean 过滤器已能保证
+    **只改行尾**时不污染历史，本函数进一步把工作树字节也纠正掉，使提交前门禁不必人工 `--fix`。
+
+    只处理暂存清单内的文件，不触碰用户未暂存的改动。
+
+    Args:
+        root: 仓库根目录。
+        cfg: 行尾配置。
+
+    Returns:
+        list[str]: 已修正并重新暂存的文件清单。
+    """
+    fixed: list[str] = []
+    for rel in staged_files(root):
+        if not _matches(rel, cfg):
+            continue
+        path = root / rel
+        try:
+            data = path.read_bytes()
+        except OSError:  # pragma: no cover - 已删除 / 不可读由调用方兜底
+            continue
+        if CRLF not in data:
+            continue
+        path.write_bytes(data.replace(CRLF, b"\n"))
+        _git(root, ["add", "--", rel])
+        fixed.append(rel)
+    return fixed

@@ -157,6 +157,7 @@ def _build_parser() -> argparse.ArgumentParser:
     eol_parser = subparsers.add_parser("eol", parents=[common], help="行尾护栏（工作树 CRLF 检查）")
     eol_parser.add_argument("--quiet", action="store_true", help="只打印结论行")
     eol_parser.add_argument("--fix", action="store_true", help="就地修正为 LF（写回工作树）")
+    eol_parser.add_argument("--fix-staged", action="store_true", help="只修正已暂存文件并重新暂存（提交钩子用）")
 
     checks_parser = subparsers.add_parser("checks", parents=[common], help="护栏检查（单进程 runner）")
     checks_parser.add_argument("--only", action="append", default=[], help="只跑这些标签（可重复）")
@@ -716,6 +717,10 @@ def _cmd_eol(args: argparse.Namespace) -> int:
         int: 退出码。
     """
     cfg = _load(args)
+    if args.fix_staged:
+        fixed = eol.fix_staged(cfg.root, cfg.eol)
+        if fixed:
+            out(f"[eol] 已把 {len(fixed)} 个暂存文件改回 LF 并重新暂存")
     report = eol.check(cfg.root, cfg.eol)
     if report.skipped:
         out(f"[eol] {report.skipped}")

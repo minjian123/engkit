@@ -163,3 +163,19 @@ def test_eol_ineffective_without_gitattributes(no_attr_repo: Path, capsys: pytes
     captured = capsys.readouterr()
     assert "护栏失效" in captured.err
     assert ".gitattributes" in captured.err
+
+
+def test_eol_fix_staged_only_touches_staged(eol_repo: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """`--fix-staged` 只改「已暂存且有真实内容改动」的文件，未暂存的改动不动。
+
+    只改行尾的文件不会进暂存区（`.gitattributes` 的 clean 过滤器把它们归一成与 HEAD 一致），
+    故用例必须带真实内容改动，才对应提交钩子遇到的真实场景。
+    """
+    (eol_repo / "bad.md").write_bytes(b"# bad\r\nchanged\r\n")
+    _git(eol_repo, "add", "bad.md")
+    (eol_repo / "keep.bat").write_bytes(b"@echo off\r\nrem changed\r\n")
+
+    assert cli.main(["eol", "--root", str(eol_repo), "--fix-staged", "--quiet"]) == 0
+    assert (eol_repo / "bad.md").read_bytes() == b"# bad\nchanged\n"
+    assert "已把 1 个暂存文件改回 LF" in capsys.readouterr().out
+    assert (eol_repo / "keep.bat").read_bytes() == b"@echo off\r\nrem changed\r\n"
