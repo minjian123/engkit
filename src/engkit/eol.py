@@ -7,6 +7,10 @@
 背景：Windows 上 `Set-Content` / `Out-File` / Python `Path.write_text()` 默认写 CRLF，
 AI 助手与脚本改完文件常常把 LF 悄悄变成 CRLF；而 `text=auto` 会在比对时把差异规范化掉，
 `git status` 看着干净，问题因此长期潜伏。本护栏把「工作树实际字节」当作判据。
+
+**失效即失败**：期望行尾来自 `.gitattributes`，仓内缺该文件（或其中没写 `eol=lf`）时每条记录
+都判不出期望值，检查会「通过 0 违规」——护栏空转而不自知（实测某产品仓长期无 `.gitattributes`，
+护栏一直报 0 违规）。故 `EolReport.ineffective` 成立时按配置错误退 2，把空转变显式失败。
 """
 
 from __future__ import annotations
@@ -44,11 +48,26 @@ class EolReport:
         files: 参与检查的文件数。
         findings: 违规清单。
         skipped: 因无 git 而跳过的说明（正常为 None）。
+        uncovered: 仓内 `.gitattributes` 未给出期望行尾的文件数（判定口径缺失）。
     """
 
     files: int
     findings: tuple[EolFinding, ...]
     skipped: str | None = None
+    uncovered: int = 0
+
+    @property
+    def ineffective(self) -> bool:
+        """护栏是否失效（有文件但全无期望行尾）。
+
+        为什么需要：期望行尾全部来自仓根 `.gitattributes`。仓内缺该文件（或未写 `eol=lf`）时，
+        每条记录都判不出期望值，检查会「通过 0 违规」——护栏空转而不自知。此属性用于把
+        空转变成显式失败。
+
+        Returns:
+            bool: 有文件参与且无一有期望值返回 True。
+        """
+        return self.files > 0 and self.uncovered >= self.files
 
 
 def _git(root: Path, args: list[str]) -> subprocess.CompletedProcess[str] | None:
@@ -155,6 +174,7 @@ def check(root: Path, cfg: EolConfig) -> EolReport:
     if result is None or result.returncode != 0:
         return EolReport(files=0, findings=(), skipped="未找到 git，行尾检查跳过")
     files = 0
+    uncovered = 0
     findings: list[EolFinding] = []
     for line in result.stdout.splitlines():
         parsed = _parse_eol_line(line)
@@ -165,10 +185,12 @@ def check(root: Path, cfg: EolConfig) -> EolReport:
             continue
         files += 1
         if expected != "lf":
+            if not expected:
+                uncovered += 1
             continue
         if worktree in ("crlf", "mixed"):
             findings.append(EolFinding(file=path, actual=worktree, expected=expected))
-    return EolReport(files=files, findings=tuple(findings))
+    return EolReport(files=files, findings=tuple(findings), uncovered=uncovered)
 
 
 def normalize(root: Path, report: EolReport) -> list[str]:

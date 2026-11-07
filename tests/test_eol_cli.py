@@ -134,3 +134,32 @@ def test_eol_truncates_long_list(eol_repo: Path, capsys: pytest.CaptureFixture[s
     captured = capsys.readouterr()
     assert "其余 1 个从略" in captured.err
     assert "f50.md" not in captured.err
+
+
+@pytest.fixture
+def no_attr_repo(tmp_path: Path) -> Path:
+    """造一个**没有** `.gitattributes` 的已提交仓库（行尾口径缺失）。
+
+    Args:
+        tmp_path: pytest 临时目录。
+
+    Returns:
+        Path: 仓库根。
+    """
+    root = tmp_path / "repo-noattr"
+    root.mkdir()
+    (root / "a.md").write_bytes(b"# a\n")
+    (root / "engkit.toml").write_bytes(b'[repo]\nname = "t"\n\n[docs]\nroot = "docs"\n')
+    _git(root, "init", "-q")
+    _git(root, "config", "core.autocrlf", "false")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-q", "-m", "init")
+    return root
+
+
+def test_eol_ineffective_without_gitattributes(no_attr_repo: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """仓内缺 `.gitattributes`：判不出期望行尾 → 护栏失效，返回 2（不再静默通过）。"""
+    assert cli.main(["eol", "--root", str(no_attr_repo)]) == 2
+    captured = capsys.readouterr()
+    assert "护栏失效" in captured.err
+    assert ".gitattributes" in captured.err

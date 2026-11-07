@@ -720,6 +720,13 @@ def _cmd_eol(args: argparse.Namespace) -> int:
     if report.skipped:
         out(f"[eol] {report.skipped}")
         return 0
+    if report.ineffective:
+        error(
+            f"[eol] 护栏失效：仓内 {report.files} 个文件均判不出期望行尾"
+            "——仓根缺 `.gitattributes` 或未声明 `* text=auto eol=lf`"
+        )
+        error("补上 `.gitattributes`（`* text=auto eol=lf` + `*.sh text eol=lf` + `*.bat text eol=crlf`）后重跑")
+        return 2
     if args.fix and report.findings:
         fixed = eol.normalize(cfg.root, report)
         out(f"[eol] 已把 {len(fixed)} 个文件改回 LF")
