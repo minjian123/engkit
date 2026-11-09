@@ -504,6 +504,27 @@ class BackendBaseRules:
 
 
 @dataclass(frozen=True)
+class FrontendBaseRules:
+    """前端基类体系规则（`[rules.frontend_base]`）。
+
+    Attributes:
+        manifest: 产品仓自持的前端基类清单。
+        chain_doc: 产品仓自持的前端基类实现契约（§7 体系根清单 + 本仓继承链）。
+        source_dirs: 本仓前端源码面（`class X extends Y` 的扫描根）。
+        base_source_dirs: 平台基座前端源码面（只用于父类解析，不参与清单对账）。
+        root_bases_marker: 实现契约里「体系根清单」小节的标记文本。
+        profile: 仓库形态（`platform` 平台仓 / `product` 产品仓）。
+    """
+
+    manifest: str
+    chain_doc: str
+    source_dirs: tuple[str, ...]
+    base_source_dirs: tuple[str, ...]
+    root_bases_marker: str
+    profile: str = "product"
+
+
+@dataclass(frozen=True)
 class DocsStatusRules:
     """需求 / 任务 / 计划一致性规则（`[rules.docs_status]`）。
 
@@ -910,6 +931,7 @@ class Config:
     toolchain: ToolchainConfig = field(default_factory=ToolchainConfig)
     base_rules: BaseRules | None = None
     backend_base_rules: BackendBaseRules | None = None
+    frontend_base_rules: FrontendBaseRules | None = None
     boundaries_rules: ServiceBoundariesRules | None = None
     collections_rules: BareCollectionsRules | None = None
     snowflake_ids_rules: SnowflakeIdsRules | None = None
@@ -1523,6 +1545,34 @@ def _parse_backend_base_rules(table: dict[str, Any], where: str) -> BackendBaseR
     )
 
 
+def _parse_frontend_base_rules(table: dict[str, Any], where: str) -> FrontendBaseRules:
+    """解析 `[rules.frontend_base]`。
+
+    Args:
+        table: 子表。
+        where: 位置描述。
+
+    Returns:
+        FrontendBaseRules: 规则。
+    """
+    _check_keys(
+        table,
+        ("manifest", "chain_doc", "source_dirs", "base_source_dirs", "root_bases_marker", "profile"),
+        where,
+    )
+    profile = _string(table, "profile", where, "product")
+    if profile not in ("platform", "product"):
+        raise _fail(where, "`profile` 取值应为 `platform` / `product`")
+    return FrontendBaseRules(
+        manifest=_string(table, "manifest", where),
+        chain_doc=_string(table, "chain_doc", where),
+        source_dirs=_strings(table, "source_dirs", where),
+        base_source_dirs=_strings(table, "base_source_dirs", where),
+        root_bases_marker=_string(table, "root_bases_marker", where, "体系根清单"),
+        profile=profile,
+    )
+
+
 def _parse_docs_status_rules(table: dict[str, Any], where: str) -> DocsStatusRules:
     """解析 `[rules.docs_status]`。
 
@@ -2059,6 +2109,7 @@ def parse(raw: dict[str, Any], path: Path) -> Config:
     rules = _table(raw, "rules", "rules")
     base_rule_set: BaseRules | None = None
     backend_base_rule_set: BackendBaseRules | None = None
+    frontend_base_rule_set: FrontendBaseRules | None = None
     boundaries_rule_set: ServiceBoundariesRules | None = None
     collections_rule_set: BareCollectionsRules | None = None
     snowflake_ids_rule_set: SnowflakeIdsRules | None = None
@@ -2074,6 +2125,7 @@ def parse(raw: dict[str, Any], path: Path) -> Config:
         "frontend",
         "base",
         "backend_base",
+        "frontend_base",
         "service_boundaries",
         "bare_collections",
         "snowflake_ids",
@@ -2091,6 +2143,10 @@ def parse(raw: dict[str, Any], path: Path) -> Config:
     if "backend_base" in rules:
         backend_base_rule_set = _parse_backend_base_rules(
             _table(rules, "backend_base", "rules.backend_base"), "rules.backend_base"
+        )
+    if "frontend_base" in rules:
+        frontend_base_rule_set = _parse_frontend_base_rules(
+            _table(rules, "frontend_base", "rules.frontend_base"), "rules.frontend_base"
         )
     if "service_boundaries" in rules:
         boundaries_rule_set = _parse_boundaries_rules(
@@ -2271,6 +2327,7 @@ def parse(raw: dict[str, Any], path: Path) -> Config:
         toolchain=toolchain,
         base_rules=base_rule_set,
         backend_base_rules=backend_base_rule_set,
+        frontend_base_rules=frontend_base_rule_set,
         boundaries_rules=boundaries_rule_set,
         collections_rules=collections_rule_set,
         snowflake_ids_rules=snowflake_ids_rule_set,

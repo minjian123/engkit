@@ -178,6 +178,7 @@ def _build_parser() -> argparse.ArgumentParser:
     base_named = (
         ("base", "基座完整性（清单 / 跨层 / 命名 / 设计登记）"),
         ("backend-base", "后端基类体系（继承链 / 错误码 / 迁移链）"),
+        ("frontend-base", "前端基类体系（继承链 / 清单 / 体系根）"),
         ("service-boundaries", "服务边界与跨库访问（服务维 + 域级）"),
         ("bare-collections", "集合声明白名单"),
         ("snowflake-ids", "雪花 ID（模型列 / 契约字段）静态护栏"),
@@ -194,6 +195,7 @@ def _build_parser() -> argparse.ArgumentParser:
         if name in (
             "base",
             "backend-base",
+            "frontend-base",
             "service-boundaries",
             "bare-collections",
             "snowflake-ids",
@@ -211,6 +213,7 @@ def _build_parser() -> argparse.ArgumentParser:
         if name in (
             "base",
             "backend-base",
+            "frontend-base",
             "system-fields",
             "env-example",
             "bare-collections",
@@ -794,6 +797,14 @@ def _cmd_base(args: argparse.Namespace) -> int:
             cfg,
             as_self_test=bool(args.self_test),
             update_baseline=bool(args.update_baseline),
+            files_from=str(args.files_from),
+        )
+    if name == "frontend-base":
+        from .base import frontend_base
+
+        return frontend_base.run(
+            cfg,
+            as_self_test=bool(args.self_test),
             files_from=str(args.files_from),
         )
     if name == "service-boundaries":
