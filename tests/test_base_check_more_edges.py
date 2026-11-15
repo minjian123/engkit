@@ -560,3 +560,63 @@ def test_system_fields_enum_declared_in_other_file(tmp_path: Path) -> None:
     assert system_fields.parse_enum_values(cfg, missing) == {}
     # 空项与「只有路径没类名」的项被忽略（容错声明写法）
     assert system_fields.enum_names_of("A@x.py, B ,C@y.py, ,@orphan.py") == frozenset({"A", "B", "C"})
+
+
+def test_system_fields_reads_option_set_values(tmp_path: Path) -> None:
+    """值域取自选项集 TOML；清单常量引用按模块级字符串常量解析（不再逼仓里保留枚举副本）。"""
+    write(
+        tmp_path,
+        {
+            "deploy/registry/platform.toml": (
+                'product_key = "platform"\n\n'
+                "[[option_sets]]\n"
+                'key = "bms.demo.kind"\n'
+                'name = "示例类型"\n'
+                "items = [\n"
+                '  { value = "dict", label = "字典" },\n'
+                '  { value = "form", label = "表单" },\n'
+                "]\n"
+            ),
+            "src/datasource.py": (
+                'DATA_SOURCE_KIND_DICT = "dict"\n'
+                "DATA_SOURCE_CATALOG = (\n"
+                "    rec(data_source_key='alpha', kind=DATA_SOURCE_KIND_DICT),\n"
+                "    rec(data_source_key='beta', kind='form'),\n"
+                "    rec(data_source_key='gamma', kind=UNKNOWN_KIND),\n"
+                ")\n"
+            ),
+        },
+    )
+    cfg = config(tmp_path)
+    spec = dataclasses.replace(
+        cfg.system_fields_rules.datasource,
+        path="src/datasource.py",
+        enum="option_set:bms.demo.kind@deploy/registry/platform.toml",
+    )
+    assert system_fields.parse_enum_values(cfg, spec) == {"dict": "dict", "form": "form"}
+    assert system_fields.parse_module_constants(tmp_path / "src/datasource.py") == {"DATA_SOURCE_KIND_DICT": "dict"}
+    declarations = system_fields.parse_kind_declarations(cfg, spec)
+    assert declarations == [("alpha", True, "dict"), ("beta", True, "form"), ("gamma", True, None)]
+    assert system_fields.diff_explicit_kind(declarations[:2], {"dict", "form"}) == []
+    assert len(system_fields.diff_explicit_kind(declarations, {"dict", "form"})) == 1
+
+    assert (
+        system_fields.parse_enum_values(
+            cfg, dataclasses.replace(spec, enum="option_set:bms.demo.kind@deploy/registry/none.toml")
+        )
+        == {}
+    )
+    assert (
+        system_fields.parse_enum_values(
+            cfg, dataclasses.replace(spec, enum="option_set:bms.other@deploy/registry/platform.toml")
+        )
+        == {}
+    )
+    write(tmp_path, {"deploy/registry/broken.toml": "[[option_sets]\n"})
+    broken = dataclasses.replace(spec, enum="option_set:bms.demo.kind@deploy/registry/broken.toml")
+    with pytest.raises(RulesError, match="选项集声明不可解析"):
+        system_fields.parse_enum_values(cfg, broken)
+
+    node = ast.parse("DATA_SOURCE_KIND_DICT").body[0].value  # type: ignore[attr-defined]
+    assert system_fields.resolve_kind_node(node, "", {}, {"DATA_SOURCE_KIND_DICT": "dict"}) == "dict"
+    assert system_fields.resolve_kind_node(node, "", {}, None) is None

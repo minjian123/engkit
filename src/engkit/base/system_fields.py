@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import ast
 import re
+import tomllib
 from pathlib import Path
 
 from ..config import Config, RegistrySpec, SystemFieldsRules
@@ -21,6 +22,13 @@ MIN_KEYS = ("catalog", "datasource", "table_dir")
 
 KEY_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 """登记标识形态（口径谓词，非仓数据）。"""
+
+OPTION_SET_PREFIX = "option_set:"
+"""`enum` 登记项前缀：值域取自选项集声明（`option_set:<key>@<toml 路径>`）。
+
+为什么需要：静态值域的权威来源已迁到清单 `[[option_sets]]`（需求 09-4），代码不再保留枚举副本；
+护栏若仍按「类成员 → 取值」解析，就会逼着仓里再写一份值清单。前缀项直接从 TOML 读条目取值。
+"""
 
 
 def _unwrap_collection(value: ast.expr | None) -> ast.Tuple | ast.List | None:
@@ -86,6 +94,7 @@ def parse_records(cfg: Config, spec: RegistrySpec) -> list[dict[str, str]]:
         list[dict[str, str]]: 每条记录的可解析关键字参数（非字符串 / 不可解析值跳过）。
     """
     enum_values = parse_enum_values(cfg, spec)
+    constants = parse_module_constants(cfg.root / spec.path)
     records: list[dict[str, str]] = []
     for item in _sequence(cfg.root / spec.path, spec.const):
         if not isinstance(item, ast.Call):
@@ -94,7 +103,7 @@ def parse_records(cfg: Config, spec: RegistrySpec) -> list[dict[str, str]]:
         for keyword in item.keywords:
             if not keyword.arg:
                 continue
-            resolved = resolve_kind_node(keyword.value, spec.enum, enum_values)
+            resolved = resolve_kind_node(keyword.value, spec.enum, enum_values, constants)
             if resolved is not None:
                 record[keyword.arg] = resolved
         records.append(record)
@@ -102,19 +111,23 @@ def parse_records(cfg: Config, spec: RegistrySpec) -> list[dict[str, str]]:
 
 
 def parse_enum_values(cfg: Config, spec: RegistrySpec) -> dict[str, str]:
-    """解析 `<enum>(StrEnum)` 的成员名 → 取值映射。
+    """解析值域声明：`<enum>(StrEnum)` 的成员名 → 取值，或选项集声明的条目取值。
 
     Args:
         cfg: 仓配置。
         spec: 清单定位（`enum` 为空返回空映射）。
 
     Returns:
-        dict[str, str]: 成员名 → 取值。
+        dict[str, str]: 成员名（或选项集取值本身）→ 取值。
     """
     if not spec.enum:
         return {}
     values: dict[str, str] = {}
     for class_name, relative in enum_declarations(spec.enum):
+        if class_name.startswith(OPTION_SET_PREFIX):
+            key = class_name.removeprefix(OPTION_SET_PREFIX).strip()
+            values.update(_option_set_values(cfg, relative or spec.path, key))
+            continue
         path = cfg.root / (relative or spec.path)
         if not path.is_file():
             continue
@@ -133,19 +146,87 @@ def parse_enum_values(cfg: Config, spec: RegistrySpec) -> dict[str, str]:
     return values
 
 
-def resolve_kind_node(node: ast.expr, enum_name: str, enum_values: dict[str, str]) -> str | None:
-    """解析取值节点：字符串字面量直取，`<Enum>.<MEMBER>.value` 经枚举映射解析。
+def _option_set_values(cfg: Config, relative: str, key: str) -> dict[str, str]:
+    """从选项集声明（`deploy/registry/*.toml` 的 `[[option_sets]]`）读取取值集合。
+
+    Args:
+        cfg: 仓配置。
+        relative: TOML 相对仓根的路径。
+        key: 选项集标识（如 `bms.datasource.kind`）。
+
+    Returns:
+        dict[str, str]: 取值 → 取值（护栏只用其值集合；键名不参与解析）。
+
+    Raises:
+        RulesError: TOML 无法解析（结构错即拒绝，不静默跳过）。
+    """
+    path = cfg.root / relative
+    if not path.is_file():
+        return {}
+    try:
+        data = tomllib.loads(read_text(path))
+    except tomllib.TOMLDecodeError as error:
+        raise RulesError(f"选项集声明不可解析：{path}（{error}）") from None
+    for entry in data.get("option_sets", []):
+        if not isinstance(entry, dict) or entry.get("key") != key:
+            continue
+        values: dict[str, str] = {}
+        for item in entry.get("items", []):
+            if isinstance(item, dict) and isinstance(item.get("value"), str):
+                values[item["value"]] = item["value"]
+        return values
+    return {}
+
+
+def parse_module_constants(path: Path) -> dict[str, str]:
+    """取模块级字符串常量（`NAME = "literal"`，含注解赋值）。
+
+    为什么需要：清单里的 `kind=DATA_SOURCE_KIND_DICT` 是常量引用，取值域来自选项集而不是枚举；
+    解析常量即可判定「显式声明 + 取值合法」，不必逼仓里保留枚举副本。
+
+    Args:
+        path: 模块文件。
+
+    Returns:
+        dict[str, str]: 常量名 → 取值。
+    """
+    if not path.is_file():
+        return {}
+    constants: dict[str, str] = {}
+    for node in ast.parse(read_text(path)).body:
+        value: ast.expr | None = None
+        names: list[str] = []
+        if isinstance(node, ast.Assign):
+            names = [target.id for target in node.targets if isinstance(target, ast.Name)]
+            value = node.value
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            names = [node.target.id]
+            value = node.value
+        if value is None or not isinstance(value, ast.Constant) or not isinstance(value.value, str):
+            continue
+        for name in names:
+            constants[name] = value.value
+    return constants
+
+
+def resolve_kind_node(
+    node: ast.expr, enum_name: str, enum_values: dict[str, str], constants: dict[str, str] | None = None
+) -> str | None:
+    """解析取值节点：字符串字面量直取，`<Enum>.<MEMBER>.value` 经枚举映射解析，常量引用经常量表解析。
 
     Args:
         node: 取值节点。
         enum_name: 枚举类名（可逗号分隔多个，同一清单可跨多类取值）。
         enum_values: 成员名 → 取值。
+        constants: 模块级字符串常量（`NAME = "literal"`）；`None` 视为空表。
 
     Returns:
         str | None: 解析出的取值；无法解析返回 None。
     """
     if isinstance(node, ast.Constant) and isinstance(node.value, str):
         return node.value
+    if isinstance(node, ast.Name) and constants:
+        return constants.get(node.id)
     if (
         isinstance(node, ast.Attribute)
         and node.attr == "value"
@@ -203,6 +284,7 @@ def parse_kind_declarations(cfg: Config, spec: RegistrySpec) -> list[tuple[str, 
         list[tuple[str, bool, str | None]]: （定位键, 是否出现 `kind`, 解析出的取值）。
     """
     enum_values = parse_enum_values(cfg, spec)
+    constants = parse_module_constants(cfg.root / spec.path)
     declarations: list[tuple[str, bool, str | None]] = []
     for item in _sequence(cfg.root / spec.path, spec.const):
         if not isinstance(item, ast.Call):
@@ -216,7 +298,7 @@ def parse_kind_declarations(cfg: Config, spec: RegistrySpec) -> list[tuple[str, 
                     locator = keyword.value.value
             elif keyword.arg == spec.kind_field:
                 declared = True
-                kind_value = resolve_kind_node(keyword.value, spec.enum, enum_values)
+                kind_value = resolve_kind_node(keyword.value, spec.enum, enum_values, constants)
         declarations.append((locator or "?", declared, kind_value))
     return declarations
 
