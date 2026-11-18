@@ -596,7 +596,7 @@ def _cmd_coverage(args: argparse.Namespace) -> int:
     data_file = Path(args.data_file).resolve()
     if args.clean:
         coverage.cleanup(data_file)
-    paths: tuple[str, ...] = ()
+    paths: tuple[str, ...] | None = None
     if args.files_from:
         try:
             paths = _read_files_from(args.files_from)
@@ -608,7 +608,7 @@ def _cmd_coverage(args: argparse.Namespace) -> int:
         if not reliable:
             error(f"[coverage] 取不到 git 变更（基准 {args.files_from_git!r} 不可用）")
             return 2
-        paths = (*paths, *collected)
+        paths = (*(paths or ()), *collected)
     try:
         return coverage.check(
             data_file,

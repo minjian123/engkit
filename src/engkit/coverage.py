@@ -592,7 +592,7 @@ def check(
     *,
     fail_under: float = 100,
     quiet: bool = False,
-    paths: tuple[str, ...] | list[str] = (),
+    paths: tuple[str, ...] | list[str] | None = None,
     gaps_out: Path | None = None,
 ) -> int:
     """合并 → 导出 → 判定。
@@ -604,23 +604,29 @@ def check(
         fail_under: 门禁阈值（100 时按「行 + 分支全达标」判定，否则按合并百分比）。
         quiet: 是否抑制度量行输出。
         paths: 门禁范围文件（仓根相对；与 `modules` 取并集，按文件精确匹配）。
+            `None` 表示不按文件过滤；**空清单**表示「批量查但本次没有文件」，按「无可判文件」放行，
+            不退化成判全仓（否则把无关模块的缺口误当成本次改动的缺口）。
         gaps_out: 缺口明细落点（人读文本；同目录另写 `gaps.json`）；None 表示不落盘。
 
     Returns:
         int: 退出码（0 达标 / 1 未达标）。
     """
     module_tuple = tuple(modules)
-    targets, ignored = target_files(paths)
+    batch = paths is not None
+    targets, ignored = target_files(paths or ())
     if combine(data_file) == 0:
         print(f"[coverage] 未采集到覆盖率数据（{data_file}）：不支持跳过，视为未达标", file=sys.stderr)
         return 1
     payload = export_json(data_file, out)
-    if paths and not targets:
-        # 批量查改动文件时，清单可能全是测试 / 配置 / 文档：必须显式列出「不参与」，
+    if batch and not targets:
+        # 批量查改动文件时，清单可能为空、也可能全是测试 / 配置 / 文档：都必须显式说明，
         # 且**不得**退化成「判全仓」——那会把无关模块的缺口误当成本次改动的缺口。
-        lines = [f"[coverage] 本次改动无可判文件：{len(ignored)} 个均不参与覆盖率判定"]
-        for item in ignored:
-            lines.append(f"[coverage]   - {item.path}：{item.reason}")
+        if ignored:
+            lines = [f"[coverage] 本次改动无可判文件：{len(ignored)} 个均不参与覆盖率判定"]
+            for item in ignored:
+                lines.append(f"[coverage]   - {item.path}：{item.reason}")
+        else:
+            lines = ["[coverage] 本次改动无可判文件（清单为空）"]
         for line in lines:
             print(line, file=sys.stderr)
         if gaps_out is not None:

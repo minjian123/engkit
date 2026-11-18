@@ -603,3 +603,19 @@ def test_check_with_paths_all_ignored(tmp_path: Path, capsys) -> None:
     assert len(payload["ignored"]) == 3
     assert coverage.check(data, root / "r2.json", (), paths=("docs/a.md",)) == 0
     assert "本次改动无可判文件：1 个" in capsys.readouterr().err
+
+
+def test_check_with_empty_batch_does_not_judge_whole_repo(tmp_path: Path, capsys) -> None:
+    """批量清单为空（本次无改动）时显式放行，**不得**把全仓缺口当成自己的缺口。"""
+    root = tmp_path / "repo"
+    data = _make_module_data(root / ".coverage", root, "src/pkg/gap.py", complete=False)
+    gaps_out = root / ".cache" / "coverage" / coverage.GAPS_TEXT_NAME
+    assert coverage.check(data, root / "r.json", (), paths=(), gaps_out=gaps_out) == 0
+    err = capsys.readouterr().err
+    assert "本次改动无可判文件（清单为空）" in err
+    assert "src/pkg/gap.py" not in err
+    payload = json.loads((gaps_out.parent / coverage.GAPS_JSON_NAME).read_text(encoding="utf-8"))
+    assert payload["totals"]["files"] == 0
+    assert payload["files"] == []
+    # 不传 `paths`（None）仍是「不限文件」：老口径按模块判全仓，不能被上面的分支吃掉
+    assert coverage.check(data, root / "r3.json", ()) == 1
