@@ -11,6 +11,9 @@
 - **改动不触及代码 / 配置**（只改 `engkit文档/`、`README.md` 之类）→ 只跑 `always` 类步骤（行尾检查等）；
 - **`ruff` / `pyright` 步骤** → 只判本次改动的 `.py` / `.pyi`（`.toml` / `.json` 不交给 Python 静态检查器，
   否则会被当 Python 解析）；无 Python 改动则跳过并注明；
+- **`pyright` 步骤另按项目声明的范围收敛** → 读步骤目录 `pyproject.toml` 的 `[tool.pyright].include`，
+  范围外文件不交给 pyright（pyright 收到显式文件参数会**忽略** `include`，按 strict 逐文件判，会把
+  声明「用例只靠 pytest + ruff」的仓的夹具判成缺批注）；
 - **定向测试步骤（`scoped_tests`）** → `engkit run_selected` 选测 + 采集覆盖率，再由
   `engkit.coverage.check_changed` 判**改动行** 100%（提交环判改动行、推送环判模块级，口径见
   《AI开发规范》「覆盖率要求」节）；
@@ -31,6 +34,7 @@ from __future__ import annotations
 import argparse
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -118,6 +122,55 @@ def step_scope(step) -> str:
     return "always"
 
 
+def pyright_scope(cwd: Path) -> tuple[str, ...]:
+    """读 pyright 的项目检查范围（步骤目录 `pyproject.toml` 的 `[tool.pyright].include`）。
+
+    pyright **收到显式文件参数时会忽略 `include`**、按项目口径逐文件判：若不先按 `include`
+    收敛，声明「用例只靠 pytest + ruff 把关」的仓（engkit 即如此）会把自己的测试夹具判成
+    「缺类型批注」（实测 333 项），任何触及测试文件的提交都会被误拦。返回空元组表示没有
+    声明（保持整树判定，不擅自放宽）。
+
+    Args:
+        cwd: 步骤工作目录（`pyproject.toml` 所在层）。
+
+    Returns:
+        tuple[str, ...]: 允许交给 pyright 的相对前缀（目录或文件；相对 `cwd`）。
+    """
+    try:
+        data = tomllib.loads((cwd / "pyproject.toml").read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError):
+        return ()
+    tool = data.get("tool")
+    if not isinstance(tool, dict):
+        return ()
+    section = tool.get("pyright")
+    if not isinstance(section, dict):
+        return ()
+    include = section.get("include")
+    if not isinstance(include, list):
+        return ()
+    return tuple(str(item) for item in include if isinstance(item, str) and item.strip())
+
+
+def within_scope(path: str, scopes: tuple[str, ...]) -> bool:
+    """判断 `cwd` 相对路径是否落在给定前缀内（按路径段匹配，不做字符串前缀碰撞）。
+
+    Args:
+        path: `cwd` 相对路径（posix 形态）。
+        scopes: 允许的前缀（目录或文件）。
+
+    Returns:
+        bool: 命中任一前缀即为 True；前缀含 `.` / `./` 表示整树放行。
+    """
+    for scope in scopes:
+        stem = scope.strip().rstrip("/")
+        if stem in ("", "."):
+            return True
+        if path == stem or path.startswith(f"{stem}/"):
+            return True
+    return False
+
+
 def step_argv(step, cwd: Path, py_files: list[str], *, scoped: bool) -> list[str] | None:
     """构造命令 argv（`lint` 步骤把检查范围收敛到改动文件）。
 
@@ -141,6 +194,14 @@ def step_argv(step, cwd: Path, py_files: list[str], *, scoped: bool) -> list[str
         for item in py_files
         if (REPO_ROOT / item).is_relative_to(cwd)
     ]
+    if any("pyright" in str(token) for token in step.cmd):
+        scopes = pyright_scope(cwd)
+        if scopes:
+            kept = [item for item in relative if within_scope(item, scopes)]
+            dropped = len(relative) - len(kept)
+            if dropped:
+                print(f"[precommit] pyright 声明范围外 {dropped} 个改动文件不判（按 [tool.pyright].include 收敛）")
+            relative = kept
     if not relative:
         return None
     if len(relative) > MAX_INLINE_FILES:
