@@ -34,6 +34,21 @@ REPORT_NAME = "report.json"
 被误判成「已采集到数据」。
 """
 
+GAPS_TEXT_NAME = "gaps.txt"
+"""缺口明细（人读）落点名：与门禁报告同目录。"""
+
+GAPS_JSON_NAME = "gaps.json"
+"""缺口明细（结构化）落点名：逐文件给出行号与分支，供批量补测直接消费。"""
+
+TARGET_OK = "ok"
+"""目标文件状态：已采集且行 + 分支达标。"""
+
+TARGET_GAP = "gap"
+"""目标文件状态：已采集但存在缺行 / 缺分支。"""
+
+TARGET_MISSING = "missing"
+"""目标文件状态：报告里没有该文件（无同名测试或本轮未跑到）。"""
+
 
 @dataclass(frozen=True)
 class ModuleGap:
@@ -48,6 +63,38 @@ class ModuleGap:
     module: str
     lines: tuple[int, ...]
     branches: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class FileGap:
+    """单个目标文件的覆盖率结论（按文件清单批量判定时使用）。
+
+    Attributes:
+        path: 仓根相对路径（posix 形态）。
+        module: 点分模块名（`src` 之后的部分）。
+        status: `ok` / `gap` / `missing`（见 `TARGET_*`）。
+        lines: 未覆盖行号（升序）。
+        branches: 未走全的分支（`from->to`）。
+    """
+
+    path: str
+    module: str
+    status: str
+    lines: tuple[int, ...] = ()
+    branches: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class IgnoredTarget:
+    """不参与覆盖率判定的文件（显式列出，避免静默丢弃）。
+
+    Attributes:
+        path: 仓根相对路径（posix 形态）。
+        reason: 不参与的原因（测试文件 / 非 Python / 不在 `src` 下）。
+    """
+
+    path: str
+    reason: str
 
 
 @dataclass(frozen=True)
@@ -211,6 +258,123 @@ def module_matches(path: str, modules: tuple[str, ...] | list[str]) -> bool:
     return False
 
 
+def _path_matches(path: str, paths: tuple[str, ...] | list[str]) -> bool:
+    """判断报告文件是否命中给定的仓根相对路径（文件级精确匹配）。
+
+    Args:
+        path: 报告里的文件路径。
+        paths: 仓根相对路径清单；空表示不按路径过滤。
+
+    Returns:
+        bool: 命中任一文件返回 True。
+    """
+    if not paths:
+        return False
+    normal = path.replace("\\", "/")
+    return any(normal.endswith(item) for item in paths)
+
+
+def _in_scope(path: str, modules: tuple[str, ...] | list[str], paths: tuple[str, ...] | list[str]) -> bool:
+    """判定报告文件是否在门禁范围内（模块前缀 ∪ 文件路径）。
+
+    Args:
+        path: 报告里的文件路径。
+        modules: 模块范围（空表示不限）。
+        paths: 文件范围（空表示不限）。
+
+    Returns:
+        bool: 在范围内返回 True。
+    """
+    if not modules and not paths:
+        return True
+    if modules and module_matches(path, modules):
+        return True
+    return _path_matches(path, paths)
+
+
+def target_files(
+    files: tuple[str, ...] | list[str],
+) -> tuple[tuple[str, ...], tuple[IgnoredTarget, ...]]:
+    """把文件清单划分为覆盖率判定目标与「不参与」项。
+
+    批量查改动文件时，测试文件、非 Python、`src` 之外的路径都不参与判定——但**必须显式列出**，
+    否则「没查到」会被误读成「已达标」。
+
+    Args:
+        files: 仓根相对路径清单（可含重复与空项）。
+
+    Returns:
+        tuple[tuple[str, ...], tuple[IgnoredTarget, ...]]: （判定目标, 不参与项）。
+    """
+    targets: list[str] = []
+    ignored: list[IgnoredTarget] = []
+    seen: set[str] = set()
+    for raw in files:
+        rel = str(raw).strip().replace("\\", "/")
+        if not rel or rel in seen:
+            continue
+        seen.add(rel)
+        if not rel.endswith(".py"):
+            ignored.append(IgnoredTarget(rel, "非 Python 源文件"))
+            continue
+        if any(segment in f"/{rel}" for segment in _TEST_SEGMENTS):
+            ignored.append(IgnoredTarget(rel, "测试文件不参与覆盖率"))
+            continue
+        if "/src/" not in f"/{rel}":
+            ignored.append(IgnoredTarget(rel, "不在 src 下（配置 / 迁移 / 运维脚本）"))
+            continue
+        targets.append(rel)
+    return tuple(targets), tuple(ignored)
+
+
+def _entry_for(table: Any, relative: str) -> Any:
+    """在报告文件表里按仓根相对路径找条目（兼容报告路径为绝对 / 反斜杠形态）。
+
+    Args:
+        table: 报告里的 `files` 表。
+        relative: 仓根相对路径。
+
+    Returns:
+        Any: 报告条目；找不到返回 None。
+    """
+    wanted = relative.replace("\\", "/")
+    for path, entry in table.items():
+        if not isinstance(entry, dict):
+            continue
+        if str(path).replace("\\", "/").endswith(wanted):
+            return entry
+    return None
+
+
+def file_gaps(payload: Any, targets: tuple[str, ...] | list[str]) -> tuple[FileGap, ...]:
+    """逐文件给出覆盖率结论（达标 / 缺口 / 未采集）。
+
+    Args:
+        payload: `export_json` 的报告内容。
+        targets: 判定目标文件（仓根相对）。
+
+    Returns:
+        tuple[FileGap, ...]: 与 `targets` 同序的结论。
+    """
+    table = payload.get("files") if isinstance(payload, dict) else None
+    entries = table if isinstance(table, dict) else {}
+    result: list[FileGap] = []
+    for rel in targets:
+        entry = _entry_for(entries, rel)
+        if entry is None:
+            result.append(FileGap(rel, module_name(rel), TARGET_MISSING))
+            continue
+        summary = entry.get("summary") or {}
+        lines = tuple(int(number) for number in (entry.get("missing_lines") or []))
+        branches = tuple(_format_branch(pair) for pair in (entry.get("missing_branches") or []))
+        missing = int(summary.get("missing_lines") or 0)
+        partial = int(summary.get("num_partial_branches") or 0)
+        result.append(
+            FileGap(rel, module_name(rel), TARGET_GAP if (missing or partial) else TARGET_OK, lines, branches)
+        )
+    return tuple(result)
+
+
 def module_name(path: str) -> str:
     """把报告路径归一为模块名（`…/src/<包>/db/keys.py` ⇒ `<包>.db.keys`）。
 
@@ -230,12 +394,17 @@ def module_name(path: str) -> str:
     return ".".join(parts)
 
 
-def filtered_totals(payload: Any, modules: tuple[str, ...] | list[str]) -> Totals:
+def filtered_totals(
+    payload: Any,
+    modules: tuple[str, ...] | list[str],
+    paths: tuple[str, ...] | list[str] = (),
+) -> Totals:
     """按门禁范围汇总覆盖率。
 
     Args:
         payload: `export_json` 的报告内容。
-        modules: 门禁范围模块（空表示全部）。
+        modules: 门禁范围模块（空表示不限）。
+        paths: 门禁范围文件（仓根相对；空表示不限）。与 `modules` 取并集。
 
     Returns:
         Totals: 汇总结果。
@@ -249,7 +418,7 @@ def filtered_totals(payload: Any, modules: tuple[str, ...] | list[str]) -> Total
     missing_modules: list[str] = []
     gaps: list[ModuleGap] = []
     for path, entry in files.items():
-        if not module_matches(str(path), modules):
+        if not _in_scope(str(path), modules, paths):
             continue
         summary = entry.get("summary") or {}
         matched += 1
@@ -326,6 +495,96 @@ def describe(totals: Totals) -> str:
     )
 
 
+def _target_summary(entries: tuple[FileGap, ...], ignored: tuple[IgnoredTarget, ...]) -> list[str]:
+    """生成按文件判定的完整明细（达标计数 + 逐文件缺口 + 未采集 + 不参与项）。
+
+    Args:
+        entries: 逐文件结论。
+        ignored: 不参与判定的文件。
+
+    Returns:
+        list[str]: 输出行（调用方统一打到 stderr）。
+    """
+    ok = sum(1 for entry in entries if entry.status == TARGET_OK)
+    gap = sum(1 for entry in entries if entry.status == TARGET_GAP)
+    missing = sum(1 for entry in entries if entry.status == TARGET_MISSING)
+    lines = [f"[coverage] 目标文件：{len(entries)}（达标 {ok} / 缺口 {gap} / 未采集 {missing}）"]
+    if ignored:
+        lines.append(f"[coverage] 不参与判定：{len(ignored)} 个")
+        for item in ignored:
+            lines.append(f"[coverage]   - {item.path}：{item.reason}")
+    for entry in entries:
+        if entry.status != TARGET_GAP:
+            continue
+        parts: list[str] = []
+        if entry.lines:
+            parts.append(f"缺行 {len(entry.lines)}（{_join(entry.lines)}）")
+        if entry.branches:
+            parts.append(f"缺分支 {len(entry.branches)}（{_join(entry.branches)}）")
+        lines.append(f"[coverage]   ✗ {entry.path}（{entry.module}）：{'，'.join(parts)}")
+    for entry in entries:
+        if entry.status == TARGET_MISSING:
+            lines.append(f"[coverage]   ? {entry.path}：未采集（无同名测试或本轮未跑到）")
+    return lines
+
+
+def _join(items: tuple[Any, ...]) -> str:
+    """完整拼接明细（不截断：批量补测需要全部行号）。
+
+    Args:
+        items: 待展示明细。
+
+    Returns:
+        str: 以「、」分隔的完整文本。
+    """
+    return "、".join(str(item) for item in items)
+
+
+def write_gaps(
+    path: Path,
+    totals: Totals,
+    entries: tuple[FileGap, ...],
+    ignored: tuple[IgnoredTarget, ...],
+    text: str,
+) -> None:
+    """把缺口明细落盘：人读文本 + 结构化 JSON（同目录 `gaps.json`）。
+
+    Args:
+        path: 文本明细落点（`<目录>/gaps.txt`）。
+        totals: 汇总结果。
+        entries: 逐文件结论。
+        ignored: 不参与判定的文件。
+        text: 终端输出的完整正文。
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text + "\n", encoding="utf-8", newline="\n")
+    payload = {
+        "totals": {
+            "files": totals.files,
+            "missing_lines": totals.missing_lines,
+            "partial_branches": totals.partial_branches,
+            "percent": round(totals.percent, 2),
+        },
+        "files": [
+            {
+                "path": entry.path,
+                "module": entry.module,
+                "status": entry.status,
+                "missing_lines": list(entry.lines),
+                "missing_branches": list(entry.branches),
+            }
+            for entry in entries
+        ],
+        "ignored": [{"path": item.path, "reason": item.reason} for item in ignored],
+    }
+    json_path = path.with_name(GAPS_JSON_NAME)
+    json_path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+
+
 def check(
     data_file: Path,
     out: Path,
@@ -333,6 +592,8 @@ def check(
     *,
     fail_under: float = 100,
     quiet: bool = False,
+    paths: tuple[str, ...] | list[str] = (),
+    gaps_out: Path | None = None,
 ) -> int:
     """合并 → 导出 → 判定。
 
@@ -342,40 +603,69 @@ def check(
         modules: 门禁范围模块（空表示全部）。
         fail_under: 门禁阈值（100 时按「行 + 分支全达标」判定，否则按合并百分比）。
         quiet: 是否抑制度量行输出。
+        paths: 门禁范围文件（仓根相对；与 `modules` 取并集，按文件精确匹配）。
+        gaps_out: 缺口明细落点（人读文本；同目录另写 `gaps.json`）；None 表示不落盘。
 
     Returns:
         int: 退出码（0 达标 / 1 未达标）。
     """
     module_tuple = tuple(modules)
+    targets, ignored = target_files(paths)
     if combine(data_file) == 0:
         print(f"[coverage] 未采集到覆盖率数据（{data_file}）：不支持跳过，视为未达标", file=sys.stderr)
         return 1
-    totals = filtered_totals(export_json(data_file, out), module_tuple)
+    payload = export_json(data_file, out)
+    if paths and not targets:
+        # 批量查改动文件时，清单可能全是测试 / 配置 / 文档：必须显式列出「不参与」，
+        # 且**不得**退化成「判全仓」——那会把无关模块的缺口误当成本次改动的缺口。
+        lines = [f"[coverage] 本次改动无可判文件：{len(ignored)} 个均不参与覆盖率判定"]
+        for item in ignored:
+            lines.append(f"[coverage]   - {item.path}：{item.reason}")
+        for line in lines:
+            print(line, file=sys.stderr)
+        if gaps_out is not None:
+            write_gaps(gaps_out, Totals(0, 0, 0, 0.0, ()), (), ignored, "\n".join(lines))
+        return 0
+    totals = filtered_totals(payload, module_tuple, targets)
+    entries = file_gaps(payload, targets)
+    missing = tuple(entry for entry in entries if entry.status == TARGET_MISSING)
     if not quiet:
         print(describe(totals))
-    if totals.files == 0:
+    if totals.files == 0 and not targets:
         print(f"[coverage] 门禁范围未匹配到任何文件：{'、'.join(module_tuple) or '（全部）'}", file=sys.stderr)
         return 1
+    lines: list[str] = []
+    if entries:
+        lines.extend(_target_summary(entries, ignored))
     if fail_under >= 100:
-        if totals.passed:
-            return 0
-        print(
-            f"[coverage] 未达标：缺行 {totals.missing_lines} / 缺分支 {totals.partial_branches}"
-            f"（{'、'.join(totals.missing_modules[:10])}）",
-            file=sys.stderr,
-        )
-        for gap in totals.gaps[:20]:
-            parts: list[str] = []
-            if gap.lines:
-                parts.append(f"缺行 {len(gap.lines)}（{_clip(gap.lines)}）")
-            if gap.branches:
-                parts.append(f"缺分支 {len(gap.branches)}（{_clip(gap.branches)}）")
-            print(f"[coverage]   {gap.module}: {'，'.join(parts)}", file=sys.stderr)
-        return 1
-    if totals.percent + 1e-9 >= fail_under:
-        return 0
-    print(f"[coverage] 未达标：{totals.percent:.2f}% < {fail_under}%", file=sys.stderr)
-    return 1
+        failed = not totals.passed or bool(missing)
+        if not totals.passed and not entries:
+            lines.append(
+                f"[coverage] 未达标：缺行 {totals.missing_lines} / 缺分支 {totals.partial_branches}"
+                f"（{'、'.join(totals.missing_modules[:10])}）"
+            )
+            for gap in totals.gaps[:20]:
+                parts: list[str] = []
+                if gap.lines:
+                    parts.append(f"缺行 {len(gap.lines)}（{_clip(gap.lines)}）")
+                if gap.branches:
+                    parts.append(f"缺分支 {len(gap.branches)}（{_clip(gap.branches)}）")
+                lines.append(f"[coverage]   {gap.module}: {'，'.join(parts)}")
+        elif not totals.passed:
+            lines.append(
+                f"[coverage] 未达标：缺行 {totals.missing_lines} / 缺分支 {totals.partial_branches}（逐文件明细见上）"
+            )
+        if missing:
+            lines.append(f"[coverage] 未采集：{len(missing)} 个目标文件不在本轮报告里（补测试或重新采集后再查）")
+    else:
+        failed = totals.percent + 1e-9 < fail_under or bool(missing)
+        if failed:
+            lines.append(f"[coverage] 未达标：{totals.percent:.2f}% < {fail_under}%")
+    for line in lines:
+        print(line, file=sys.stderr)
+    if gaps_out is not None:
+        write_gaps(gaps_out, totals, entries, ignored, "\n".join([describe(totals), *lines]))
+    return 1 if failed else 0
 
 
 def changed_lines(root: Path, relative: str) -> tuple[int, ...]:

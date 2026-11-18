@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import io
 import subprocess
 import sys
 from pathlib import Path
@@ -209,11 +210,12 @@ def test_run_self_tests_unreliable(cfg, monkeypatch) -> None:
 
 
 def test_gate_command(cfg) -> None:
-    """门禁命令在配置的解释器里跑 engkit 自身。"""
+    """门禁命令在配置的解释器里跑 engkit 自身，并固定落盘缺口明细。"""
     argv = preflight.gate_command(cfg, cfg.root / ".coverage", cfg.root / "r.json", ["pkg"], 100)
     assert argv[0] == "python"
     assert "engkit_main" in argv[-1]
     assert "--module" in argv[-1]
+    assert "--gaps-out" in argv[-1]
 
 
 def test_run_pytest_once(tmp_path: Path) -> None:
@@ -365,6 +367,74 @@ def test_run_selected_pytest_failure(cfg) -> None:
         )
         == 5
     )
+
+
+def test_run_selected_passes_failure_detail_args(cfg, monkeypatch) -> None:
+    """pytest 首轮即带 `-rf --tb=long`：失败摘要 + 完整 traceback 一次给全（不用重跑）。"""
+    seen: dict[str, list[str]] = {}
+
+    def fake_run(argv, workdir, env, limit):
+        seen["argv"] = list(argv)
+        return 0, []
+
+    monkeypatch.setattr(preflight, "run_pytest_once", fake_run)
+    code = preflight.run_selected(
+        cfg,
+        changed=["backend/libs/pkg_a/src/pkg_a/util.py"],
+        pytest_cmd=PASS_CMD,
+        cov=False,
+    )
+    assert code == 0
+    argv = seen["argv"]
+    assert "-rf" in argv
+    assert argv[argv.index("-rf") + 1] == "--tb=long"
+
+
+def test_mirror_writes_stream_and_log(tmp_path: Path) -> None:
+    """`_Mirror` 把内容同时写到原流与日志句柄，并刷新两者。"""
+    stream = io.StringIO()
+    log_path = tmp_path / "last-run.log"
+    with log_path.open("w", encoding="utf-8", newline="\n") as handle:
+        mirror = preflight._Mirror(stream, handle)
+        assert mirror.write("abc") == 3
+        mirror.flush()
+    assert stream.getvalue() == "abc"
+    assert log_path.read_text(encoding="utf-8") == "abc"
+
+
+def test_run_preflight_writes_full_log(cfg, monkeypatch, capsys) -> None:
+    """预检完整输出（stdout + stderr）落盘，并在结尾打印日志绝对路径。"""
+
+    def fake(config, **kwargs):
+        print("[engkit] 标准输出")
+        print("[engkit] 标准错误", file=sys.stderr)
+        return 0
+
+    monkeypatch.setattr(preflight, "_run_preflight", fake)
+    code = preflight.run_preflight(cfg, mode="fast", jobs="off", no_cov=True, no_scope=True, from_push=True)
+    assert code == 0
+    log_path = cfg.root / cfg.preflight.gate.log_file
+    text = log_path.read_text(encoding="utf-8")
+    assert "[engkit] 标准输出" in text
+    assert "[engkit] 标准错误" in text
+    assert "完整运行日志" in capsys.readouterr().out
+
+
+def test_run_preflight_without_log_file(cfg, monkeypatch) -> None:
+    """`log_file` 为空串 ⇒ 不落盘，直接执行预检。"""
+    gate = dataclasses.replace(cfg.preflight.gate, log_file="")
+    config = dataclasses.replace(cfg, preflight=dataclasses.replace(cfg.preflight, gate=gate))
+    monkeypatch.setattr(preflight, "_run_preflight", lambda *args, **kwargs: 0)
+    assert preflight.run_preflight(config, mode="fast", jobs="off", no_cov=True, no_scope=True, from_push=True) == 0
+
+
+def test_run_preflight_log_open_failure_falls_back(cfg, monkeypatch) -> None:
+    """日志落点不可写（父路径是文件）⇒ 不落盘也不阻断预检，退出码原样透传。"""
+    (cfg.root / "blocker").write_text("x", encoding="utf-8")
+    gate = dataclasses.replace(cfg.preflight.gate, log_file="blocker/last-run.log")
+    config = dataclasses.replace(cfg, preflight=dataclasses.replace(cfg.preflight, gate=gate))
+    monkeypatch.setattr(preflight, "_run_preflight", lambda *args, **kwargs: 7)
+    assert preflight.run_preflight(config, mode="fast", jobs="off", no_cov=True, no_scope=True, from_push=True) == 7
 
 
 def test_run_selected_timeout(cfg) -> None:

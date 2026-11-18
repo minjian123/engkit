@@ -104,6 +104,17 @@ def _build_parser() -> argparse.ArgumentParser:
     gate.add_argument("--data-file", required=True, help="覆盖率数据文件基址")
     gate.add_argument("--out", required=True, help="JSON 报告落点")
     gate.add_argument("--module", action="append", default=[], help="门禁范围模块（可重复）")
+    gate.add_argument(
+        "--files-from",
+        default="",
+        help="文件清单（仓根相对，一行一个；`-` 表示标准输入）；按文件精确匹配，与 --module 取并集",
+    )
+    gate.add_argument("--gaps-out", default="", help="缺口明细落点（人读文本；同目录另写 gaps.json）")
+    gate.add_argument(
+        "--files-from-git",
+        default="",
+        help="从 git 变更取文件清单（基准引用，如 HEAD / origin/main；含未跟踪文件）",
+    )
     gate.add_argument("--fail-under", type=float, default=100.0, help="门禁阈值")
     gate.add_argument("--quiet", action="store_true", help="不打印度量行")
     gate.add_argument("--clean", action="store_true", help="判定前先清理旧采集文件")
@@ -557,6 +568,22 @@ def _cmd_run_changed(args: argparse.Namespace) -> int:
     )
 
 
+def _read_files_from(source: str) -> tuple[str, ...]:
+    """读取文件清单（`-` 表示标准输入；忽略空行与 `#` 注释）。
+
+    Args:
+        source: 清单文件路径或 `-`。
+
+    Returns:
+        tuple[str, ...]: 仓根相对路径。
+
+    Raises:
+        OSError: 清单文件不可读。
+    """
+    text = sys.stdin.read() if source == "-" else Path(source).read_text(encoding="utf-8")
+    return tuple(line.strip() for line in text.splitlines() if line.strip() and not line.strip().startswith("#"))
+
+
 def _cmd_coverage(args: argparse.Namespace) -> int:
     """执行覆盖率门禁。
 
@@ -569,6 +596,19 @@ def _cmd_coverage(args: argparse.Namespace) -> int:
     data_file = Path(args.data_file).resolve()
     if args.clean:
         coverage.cleanup(data_file)
+    paths: tuple[str, ...] = ()
+    if args.files_from:
+        try:
+            paths = _read_files_from(args.files_from)
+        except OSError as exc:
+            error(f"[coverage] 读取文件清单失败：{exc}")
+            return 2
+    if args.files_from_git:
+        collected, reliable = gitutil.changes(Path(args.root).resolve(), args.files_from_git)
+        if not reliable:
+            error(f"[coverage] 取不到 git 变更（基准 {args.files_from_git!r} 不可用）")
+            return 2
+        paths = (*paths, *collected)
     try:
         return coverage.check(
             data_file,
@@ -576,6 +616,8 @@ def _cmd_coverage(args: argparse.Namespace) -> int:
             tuple(args.module),
             fail_under=args.fail_under,
             quiet=args.quiet,
+            paths=paths,
+            gaps_out=Path(args.gaps_out).resolve() if args.gaps_out else None,
         )
     except RuntimeError as exc:
         error(f"[coverage] {exc}")

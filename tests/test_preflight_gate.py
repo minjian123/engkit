@@ -127,6 +127,27 @@ def test_gate_unreliable(monkeypatch: pytest.MonkeyPatch, cfg) -> None:
     assert decision.reliable is False
 
 
+def test_is_artifact() -> None:
+    """工具产物判定：只认 `.cache/` 自身及其下的条目。"""
+    assert preflight_gate._is_artifact(".cache") is True
+    assert preflight_gate._is_artifact(".cache/preflight/last-run.log") is True
+    assert preflight_gate._is_artifact("cached.txt") is False
+    assert preflight_gate._is_artifact("src/.cache/x.py") is False
+
+
+def test_gate_ignores_cache_artifacts(git_repo: Path, cfg, monkeypatch: pytest.MonkeyPatch) -> None:
+    """预检自己写下的 `.cache/` 产物不算脏（避免首次运行日志导致自我拒绝）。"""
+    _no_ci(monkeypatch)
+    log = git_repo / ".cache" / "preflight" / "last-run.log"
+    log.parent.mkdir(parents=True)
+    log.write_text("x", encoding="utf-8")
+    assert preflight_gate.evaluate(cfg).blocked is False
+    (git_repo / "new.txt").write_text("x", encoding="utf-8")
+    decision = preflight_gate.evaluate(cfg)
+    assert decision.blocked is True
+    assert decision.entries == ("new.txt",)
+
+
 def test_ahead_git_failure(monkeypatch: pytest.MonkeyPatch) -> None:
     """rev-list / diff 失败：不可判定。"""
     monkeypatch.setattr(gitutil, "ref_exists", lambda root, ref: True)

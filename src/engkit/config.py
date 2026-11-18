@@ -258,10 +258,12 @@ class PreflightGateConfig:
     Attributes:
         dirty_tree: 脏工作树即拒绝（预检是推送前门禁；可在仓配置关闭）。
         audit_file: 调用审计落点（相对仓根；空串表示不记录）。
+        log_file: 预检完整运行日志落点（相对仓根；空串表示不落盘）。
     """
 
     dirty_tree: bool = True
     audit_file: str = ".cache/preflight/audit.jsonl"
+    log_file: str = ".cache/preflight/last-run.log"
 
 
 @dataclass(frozen=True)
@@ -2245,7 +2247,7 @@ def parse(raw: dict[str, Any], path: Path) -> Config:
     budget_table = _table(preflight_table, "budget", "preflight.budget")
     _check_keys(budget_table, ("scoped", "full"), "preflight.budget")
     gate_table = _table(preflight_table, "gate", "preflight.gate")
-    _check_keys(gate_table, ("dirty_tree", "audit_file"), "preflight.gate")
+    _check_keys(gate_table, ("dirty_tree", "audit_file", "log_file"), "preflight.gate")
     checks_runner = _string(preflight_table, "checks_runner", "preflight", "single")
     if checks_runner not in ("single", "process"):
         raise _fail("preflight", f"`checks_runner` 非法：{checks_runner}")
@@ -2259,6 +2261,7 @@ def parse(raw: dict[str, Any], path: Path) -> Config:
         gate=PreflightGateConfig(
             dirty_tree=bool(_scalar(gate_table, "dirty_tree", "preflight.gate", bool, True)),
             audit_file=_string(gate_table, "audit_file", "preflight.gate", ".cache/preflight/audit.jsonl"),
+            log_file=_string(gate_table, "log_file", "preflight.gate", ".cache/preflight/last-run.log"),
         ),
         steps=_parse_steps(preflight_table, "preflight"),
         self_tests=_parse_self_tests(preflight_table, "preflight"),

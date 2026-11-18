@@ -147,6 +147,38 @@ class Tee:
         self._stream.flush()
 
 
+class _Mirror:
+    """把输出同时写到原流与日志句柄（stdout / stderr 共用同一句柄，保证行序不交错）。"""
+
+    def __init__(self, stream: Any, handle: Any) -> None:
+        """初始化。
+
+        Args:
+            stream: 原输出流（`sys.stdout` / `sys.stderr`）。
+            handle: 已打开的日志文件句柄（UTF-8 / LF）。
+        """
+        self._stream = stream
+        self._handle = handle
+
+    def write(self, data: str) -> int:
+        """写内容（原流实时透传，同时落盘）。
+
+        Args:
+            data: 文本。
+
+        Returns:
+            int: 写入长度。
+        """
+        self._stream.write(data)
+        self._handle.write(data)
+        return len(data)
+
+    def flush(self) -> None:
+        """刷新原流与日志句柄。"""
+        self._stream.flush()
+        self._handle.flush()
+
+
 def jobs_args(value: str) -> tuple[str, ...]:
     """把并行档位取值转换为 pytest 参数。
 
@@ -656,6 +688,7 @@ def gate_command(cfg: Config, data_file: Path, report: Path, modules: list[str],
     """
     source_root = Path(__file__).resolve().parents[1].as_posix()
     args = ["coverage", "--data-file", str(data_file), "--out", str(report), "--fail-under", str(fail_under)]
+    args.extend(["--gaps-out", str(data_file.parent / coverage.GAPS_TEXT_NAME)])
     for module in modules:
         args.extend(["--module", module])
     script = (
@@ -999,7 +1032,8 @@ def run_selected(
         if len(targets) != len(test_paths):
             out(f"[test-selection] 目录聚合：{len(test_paths)} 个文件 → {len(targets)} 个目标")
         for index, batch in enumerate(batches, start=1):
-            argv = [*shlex.split(command_prefix), "-q", *batch]
+            # `-rf --tb=long`：失败摘要 + 完整 traceback 一次给全，避免「先看失败、再带参数重跑」。
+            argv = [*shlex.split(command_prefix), "-q", "-rf", "--tb=long", *batch]
             if cov_enabled and cfg.coverage.plugin:
                 argv.extend(["-p", cfg.coverage.plugin])
             argv.extend(parallel)
@@ -1287,7 +1321,82 @@ def run_preflight(
     from_push: bool = False,
     wall_started: float | None = None,
 ) -> int:
-    """执行预检。
+    """执行预检，并把**完整输出**（stdout + stderr，含每条子命令原始输出）落盘。
+
+    日志落点取 `[preflight.gate].log_file`（缺省 `.cache/preflight/last-run.log`）：
+    终端会滚动、被截断，只留尾巴；落盘后失败明细一次拿全，不需要「再跑一遍带日志」。
+
+    Args:
+        cfg: 仓配置。
+        mode: 档位（`scoped` / `fast` / `full`）。
+        jobs: 并行档位。
+        no_cov: 是否跳过覆盖率门禁。
+        no_scope: 是否跳过逐工程范围（仅全量档有意义）。
+        step_seconds: 单步预算覆盖（推送入口受 600s 硬上限封顶）。
+        budget_seconds: 总体预算覆盖（推送入口受 600s 硬上限封顶）。
+        from_push: 是否由推送入口（`engkit push`）调用；本地手动调用一律拒绝。
+        wall_started: 单次 push 全链路墙钟起点（由 `run_push` 传入，与预检预算同源）。
+
+    Returns:
+        int: 退出码（0 全通过 / 1 有失败项或被闸门拒绝 / 2 本地手动调用）。
+    """
+    relative = cfg.preflight.gate.log_file
+    handle: Any = None
+    log_path: Path | None = None
+    if relative:
+        log_path = cfg.root / relative
+        try:
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            handle = log_path.open("w", encoding="utf-8", newline="\n")
+        except OSError:
+            handle = None
+    if handle is None or log_path is None:
+        return _run_preflight(
+            cfg,
+            mode=mode,
+            jobs=jobs,
+            no_cov=no_cov,
+            no_scope=no_scope,
+            step_seconds=step_seconds,
+            budget_seconds=budget_seconds,
+            from_push=from_push,
+            wall_started=wall_started,
+        )
+    try:
+        with (
+            contextlib.redirect_stdout(_Mirror(sys.stdout, handle)),
+            contextlib.redirect_stderr(_Mirror(sys.stderr, handle)),
+        ):
+            code = _run_preflight(
+                cfg,
+                mode=mode,
+                jobs=jobs,
+                no_cov=no_cov,
+                no_scope=no_scope,
+                step_seconds=step_seconds,
+                budget_seconds=budget_seconds,
+                from_push=from_push,
+                wall_started=wall_started,
+            )
+            print(f"[engkit] 完整运行日志：{log_path.resolve()}（含全部步骤输出与 stderr）")
+        return code
+    finally:
+        handle.close()
+
+
+def _run_preflight(
+    cfg: Config,
+    *,
+    mode: str,
+    jobs: str,
+    no_cov: bool,
+    no_scope: bool,
+    step_seconds: float | None = None,
+    budget_seconds: float | None = None,
+    from_push: bool = False,
+    wall_started: float | None = None,
+) -> int:
+    """执行预检（把运行日志落盘由 `run_preflight` 负责）。
 
     Args:
         cfg: 仓配置。

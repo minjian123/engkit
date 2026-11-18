@@ -184,6 +184,88 @@ def test_coverage_command(tmp_path: Path, capsys) -> None:
     assert "未采集到覆盖率数据" in capsys.readouterr().err
 
 
+def test_read_files_from_file_and_stdin(tmp_path: Path, monkeypatch) -> None:
+    """文件清单读取：忽略空行与 `#` 注释，`-` 走标准输入。"""
+    listing = tmp_path / "files.txt"
+    listing.write_text("# 注释\n\nsrc/a.py\n  src/b.py  \n", encoding="utf-8")
+    assert cli._read_files_from(str(listing)) == ("src/a.py", "src/b.py")
+    monkeypatch.setattr("sys.stdin", io.StringIO("src/c.py\n# x\n\n"))
+    assert cli._read_files_from("-") == ("src/c.py",)
+
+
+def test_coverage_files_from_missing_file(tmp_path: Path, capsys) -> None:
+    """清单文件不可读即返回 2（不静默按空清单放行）。"""
+    code = cli.main(
+        [
+            "coverage",
+            "--data-file",
+            str(tmp_path / ".coverage"),
+            "--out",
+            str(tmp_path / "r.json"),
+            "--files-from",
+            str(tmp_path / "absent.txt"),
+        ]
+    )
+    assert code == 2
+    assert "读取文件清单失败" in capsys.readouterr().err
+
+
+def test_coverage_files_from_git_unreliable(tmp_path: Path, monkeypatch, capsys) -> None:
+    """取不到 git 变更即返回 2（基准不可用时不得当成「无改动」放行）。"""
+    monkeypatch.setattr(cli.gitutil, "changes", lambda root, since: ([], False))
+    code = cli.main(
+        [
+            "coverage",
+            "--data-file",
+            str(tmp_path / ".coverage"),
+            "--out",
+            str(tmp_path / "r.json"),
+            "--files-from-git",
+            "HEAD",
+        ]
+    )
+    assert code == 2
+    assert "取不到 git 变更" in capsys.readouterr().err
+
+
+def test_coverage_files_from_git_merges_listing(git_repo: Path, tmp_path: Path, monkeypatch) -> None:
+    """批量清单：`--files-from` 与 `--files-from-git` 合并后交给门禁（含未跟踪文件）。"""
+    seen: dict[str, tuple[str, ...]] = {}
+
+    def fake_check(data_file, out, modules=(), **kwargs):
+        seen["paths"] = tuple(kwargs.get("paths") or ())
+        seen["modules"] = tuple(modules)
+        return 0
+
+    monkeypatch.setattr(cli.coverage, "check", fake_check)
+    module = git_repo / "src" / "pkg" / "new.py"
+    module.parent.mkdir(parents=True)
+    module.write_text("X = 1\n", encoding="utf-8")
+    listing = tmp_path / "files.txt"
+    listing.write_text("docs/a.md\nsrc/pkg/new.py\n", encoding="utf-8")
+    code = cli.main(
+        [
+            "coverage",
+            "--root",
+            str(git_repo),
+            "--data-file",
+            str(git_repo / ".coverage"),
+            "--out",
+            str(git_repo / "r.json"),
+            "--files-from",
+            str(listing),
+            "--files-from-git",
+            "HEAD",
+            "--gaps-out",
+            str(tmp_path / "gaps.txt"),
+        ]
+    )
+    assert code == 0
+    assert seen["paths"][0] == "docs/a.md"
+    assert seen["paths"].count("src/pkg/new.py") == 2
+    assert seen["modules"] == ()
+
+
 def test_preflight_self_test(repo: Path, capsys) -> None:
     """预检引擎自检。"""
     assert cli.main(["preflight", "--root", str(repo), "--self-test"]) == 0

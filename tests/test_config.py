@@ -317,3 +317,15 @@ def test_reuse_defaults_and_overrides(build_repo) -> None:
     assert overridden.reuse_file == "x/steps.json"
     assert overridden.reuse_ttl_days == 3
     assert overridden.checks_runner == "process"
+
+
+def test_gate_log_file_defaults_and_overrides(build_repo) -> None:
+    """预检日志落点：缺省落 `.cache/preflight/last-run.log`，可在 `[preflight.gate]` 覆盖。"""
+    from conftest import BASE_CONFIG
+
+    plain = load(build_repo() / "engkit.toml").preflight.gate
+    assert plain.log_file == ".cache/preflight/last-run.log"
+    assert plain.audit_file == ".cache/preflight/audit.jsonl"
+    config = BASE_CONFIG.replace("[guard]", '[preflight.gate]\nlog_file = "x/run.log"\n\n[guard]')
+    overridden = load(build_repo(config=config) / "engkit.toml").preflight.gate
+    assert overridden.log_file == "x/run.log"

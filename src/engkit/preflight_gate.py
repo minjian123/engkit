@@ -29,6 +29,25 @@ REASON_DIRTY = "dirty-tree"
 _SAMPLE = 5
 """审计里保留的脏条目样例条数（完整清单在 git status 里可查，故不整份落盘）。"""
 
+_ARTIFACT_PREFIX = ".cache/"
+"""工具产物目录前缀：预检自己要写日志 / 审计 / 采集数据，不能因此把自己判成「开发中」。
+
+各仓 `.cache/` 一律在 `.gitignore` 内（工作区卫生约定）；此处再按前缀兜底，
+避免「首次运行创建日志 → 闸门把日志当未提交改动 → 自我拒绝」。
+"""
+
+
+def _is_artifact(entry: str) -> bool:
+    """条目是否属于工具产物（`.cache/` 下的文件或目录）。
+
+    Args:
+        entry: 仓根相对条目路径。
+
+    Returns:
+        bool: 属于产物返回 True。
+    """
+    return entry == _ARTIFACT_PREFIX.rstrip("/") or entry.startswith(_ARTIFACT_PREFIX)
+
 
 @dataclass(frozen=True)
 class Decision:
@@ -59,6 +78,7 @@ def evaluate(cfg: Config) -> Decision:
     if not cfg.preflight.gate.dirty_tree or guard.is_ci():
         return Decision(blocked=False)
     entries, reliable = gitutil.worktree_dirty(cfg.root)
+    entries = [item for item in entries if not _is_artifact(item)]
     if not entries:
         return Decision(blocked=False, reliable=reliable)
     return Decision(blocked=True, entries=tuple(entries), reliable=reliable, reason=REASON_DIRTY)
