@@ -165,8 +165,17 @@ def test_selection_without_backend(tmp_path: Path, capsys) -> None:
     assert cli.main(["selection", "--root", str(root), "--changed-file", "x.py", "--format", "changed-services"]) == 0
 
 
-def test_run_selected_command(repo: Path, capsys) -> None:
-    """定向执行器：无受影响测试即 0。"""
+def test_run_selected_command(build_repo, capsys) -> None:
+    """定向执行器：无受影响测试即 0。
+
+    临时仓自带 git、基准取 `HEAD`：`[[preflight].since]` 缺省 `origin/main` 会在
+    `.cache/` 临时目录里解析到**外层 engkit 仓**，把本地未推送提交当成本次变更
+    （实测选中无关测试后因 PATH 上的 `python` 无 pytest 而假失败）。
+    """
+    from conftest import BASE_CONFIG, init_git
+
+    repo = build_repo(config=BASE_CONFIG.replace("[preflight]", '[preflight]\nsince = "HEAD"'))
+    init_git(repo)
     assert cli.main(["run-selected", "--root", str(repo), "--changed-file", "docs/文档首页.md"]) == 0
     assert "跳过 pytest" in capsys.readouterr().out
 

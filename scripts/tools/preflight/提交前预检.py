@@ -41,7 +41,12 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 """engkit 仓库根（本文件位于 `scripts/tools/preflight/`）。"""
 
 GATED_PREFIXES = ("src/", "tests/", "toolchain/", "pyproject.toml", "engkit.toml")
-"""需要门禁的代码 / 配置路径前缀。"""
+"""需要门禁的代码 / 配置路径前缀。
+
+`scripts/` 有意**不收**：仓内工具脚本不打断提交，改动的静态口径由推送环 / CI 的整仓
+`ruff check .` / `ruff format --check .` 兜住（步骤表见 `engkit.toml`）。此处不是漏登记，
+补上前请先确认要的是「提交时就发现」而非「推送时兜住」。
+"""
 
 GATED_SUFFIXES = (".py", ".pyi", ".toml", ".yml", ".yaml", ".json")
 """需要门禁的代码 / 配置后缀。"""
