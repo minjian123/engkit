@@ -809,9 +809,14 @@ class TestDbIsolationRules:
         db_file_suffixes: 临时库文件名后缀（`tmp_path / "x.db"` 命中即违规）。
         id_columns: 原生 SQL 里按 ID 过滤的列名（绑定 int 常量即违规）。
         cleanup_calls: 全表清理调用名（`drop_all` 等，无白名单即违规）。
+        ddl_calls: 建表调用名（`create_all` 等；单库叠加下自建表集即「自建库」的等价形态）。
+        ddl_sql_patterns: 原生 SQL 里的 DDL 片段（小写比对，`truncate` / `drop table` 命中即违规）。
+        wait_calls: 假等待调用名（`sleep` 等；用例内等待取代了断言，属反模式）。
         exclude_parts: 剪枝目录名。
         base_modules: 共享测试基座模块（相对仓根；这类模块的职责就是建库，不参与判定）。
         memory_literals: 内存库连接串（不落文件、不产生跨用例状态，不算自建库）。
+        baseline: 存量基线 JSON 路径（相对仓根；空串不启用，命中全量报错）。
+        baseline_version: 基线快照版本（格式变更时递增）。
     """
 
     scan_targets: tuple[str, ...]
@@ -821,9 +826,14 @@ class TestDbIsolationRules:
     db_file_suffixes: tuple[str, ...] = (".db",)
     id_columns: tuple[str, ...] = ("id",)
     cleanup_calls: tuple[str, ...] = ("drop_all",)
+    ddl_calls: tuple[str, ...] = ("create_all",)
+    ddl_sql_patterns: tuple[str, ...] = ("truncate", "drop table")
+    wait_calls: tuple[str, ...] = ("sleep",)
     exclude_parts: tuple[str, ...] = ("__pycache__", ".venv", "node_modules", ".git")
     base_modules: tuple[str, ...] = ()
     memory_literals: tuple[str, ...] = ("sqlite://", "sqlite+aiosqlite://")
+    baseline: str = ""
+    baseline_version: int = 1
 
 
 @dataclass(frozen=True)
@@ -1917,9 +1927,14 @@ def _parse_test_db_isolation_rules(table: dict[str, Any], where: str) -> TestDbI
             "db_file_suffixes",
             "id_columns",
             "cleanup_calls",
+            "ddl_calls",
+            "ddl_sql_patterns",
+            "wait_calls",
             "exclude_parts",
             "base_modules",
             "memory_literals",
+            "baseline",
+            "baseline_version",
         ),
         where,
     )
@@ -1931,9 +1946,14 @@ def _parse_test_db_isolation_rules(table: dict[str, Any], where: str) -> TestDbI
         db_file_suffixes=_strings(table, "db_file_suffixes", where, (".db",)),
         id_columns=_strings(table, "id_columns", where, ("id",)),
         cleanup_calls=_strings(table, "cleanup_calls", where, ("drop_all",)),
+        ddl_calls=_strings(table, "ddl_calls", where, ("create_all",)),
+        ddl_sql_patterns=_strings(table, "ddl_sql_patterns", where, ("truncate", "drop table")),
+        wait_calls=_strings(table, "wait_calls", where, ("sleep",)),
         exclude_parts=_strings(table, "exclude_parts", where, ("__pycache__", ".venv", "node_modules", ".git")),
         base_modules=_strings(table, "base_modules", where, ()),
         memory_literals=_strings(table, "memory_literals", where, ("sqlite://", "sqlite+aiosqlite://")),
+        baseline=_string(table, "baseline", where, ""),
+        baseline_version=_scalar(table, "baseline_version", where, int, 1),
     )
 
 

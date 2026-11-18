@@ -1,21 +1,27 @@
 """测试库隔离静态护栏（`engkit base test-db-isolation`）。
 
-口径（需求 04-6 / 任务 04-6-1，2026-11-01 拍板）：
+口径（需求 04-6 / 任务 04-6-1，2026-11-01 拍板；13_08 扩围）：
 
 - **G1 自建库**：测试代码不得为“图省事”自建 SQLite（连接串字面量 / 直接构造引擎 /
   `tmp_path` 派生 `*.db`）；“建库即被测”的用例打 `@pytest.mark.own_db("理由")` 进白名单。
 - **G2 裸 int ID**：原生 SQL 的 ID 参数必须经测试基座的 `sqlite_id()` 包装；
   绑定 int 常量即违规（SQLite 落 38 位补零 TEXT，裸 int 查不到）。
-- **G3 清理他人数据**：单库叠加下不得 `drop_all` / 无 `where` 的 `delete()`（白名单内的自建表除外）。
+- **G3 清理他人数据**：单库叠加下不得 `drop_all` / `create_all` / `TRUNCATE` / `DROP TABLE` /
+  无 `where` 的 `delete()`（白名单内的自建表除外）——建表与清表都会打到共享库上他人数据。
+- **G4 假等待**：用例里不得 `sleep()` 等状态；等待应以确定性断言（轮询条件 / 事件）替代。
 
 判定用 AST（不用正则），避免注释与字符串误判；支持 `--files-from` 增量与 `--list-own-db` 白名单导出。
+扩围后的存量违规由 `[rules.test_db_isolation].baseline` 快照登记，**只减不增**：同一文件同一
+规则码的命中数不得超过基线值，新增即失败；基线随治理递减重写（`--update-baseline`）。
 """
 
 from __future__ import annotations
 
 import ast
+import json
 import sys
 from pathlib import Path
+from typing import NamedTuple
 
 from ..config import Config, TestDbIsolationRules
 from ..console import out
@@ -26,10 +32,36 @@ MIN_KEYS = ("scan_targets",)
 """未登记时报错给出的最小键指引。"""
 
 _SQL_CALLS = ("execute", "exec_driver_sql")
-"""原生 SQL 执行入口名（G2 判定范围）。"""
+"""原生 SQL 执行入口名（G2 / G3 判定范围）。"""
 
 _DELETE_NAME = "delete"
 """SQLAlchemy 全表删除构造名（G3 判定范围）。"""
+
+G1 = "G1"
+G2 = "G2"
+G3 = "G3"
+G4 = "G4"
+"""规则码（基线快照按「文件 + 规则码」计数，行号变动不失效）。"""
+
+
+class Hit(NamedTuple):
+    """一处命中。
+
+    Attributes:
+        file: 相对仓库根的 POSIX 路径。
+        code: 规则码（G1 / G2 / G3 / G4）。
+        lineno: 行号（仅用于报告）。
+        message: 问题描述。
+    """
+
+    file: str
+    code: str
+    lineno: int
+    message: str
+
+
+class BaselineError(Exception):
+    """基线快照非法（格式 / 版本 / 字段）。"""
 
 
 def _is_allowed(node: ast.AST, marker: str) -> bool:
@@ -194,6 +226,7 @@ class _Scanner(ast.NodeVisitor):
         self.rule = rule
         self.sql_delete = sql_delete
         self.problems: list[str] = []
+        self.hits: list[Hit] = []
         self._allowed = 0
 
     def _scope(self, node: ast.AST) -> None:
@@ -252,7 +285,7 @@ class _Scanner(ast.NodeVisitor):
             and node.value.startswith(self.rule.db_literal_prefixes)
             and not _is_memory_db(node.value, self.rule)
         ):
-            self._report(node, "G1 自建 SQLite：连接串字面量（应用共享夹具；确需建库请打 own_db 白名单）")
+            self._report(node, G1, "G1 自建 SQLite：连接串字面量（应用共享夹具；确需建库请打 own_db 白名单）")
         self.generic_visit(node)
 
     def visit_Call(self, node: ast.Call) -> None:
@@ -263,11 +296,15 @@ class _Scanner(ast.NodeVisitor):
         """
         name = _call_name(node)
         if name in self.rule.engine_factories and not _engine_on_memory(node, self.rule):
-            self._report(node, f"G1 自建 SQLite：直接构造引擎 {name}()（应用共享夹具）")
+            self._report(node, G1, f"G1 自建 SQLite：直接构造引擎 {name}()（应用共享夹具）")
         if name in self.rule.cleanup_calls:
-            self._report(node, f"G3 清理他人数据：{name}() 会清空共享库（确需请打 own_db 白名单）")
+            self._report(node, G3, f"G3 清理他人数据：{name}() 会清空共享库（确需请打 own_db 白名单）")
+        if name in self.rule.ddl_calls:
+            self._report(node, G3, f"G3 共享库 DDL：{name}() 会建 / 删共享库的表（确需请打 own_db 白名单）")
+        if name in self.rule.wait_calls:
+            self._report(node, G4, f"G4 假等待：{name}() 取代了确定性断言（改为轮询条件 / 等事件）")
         if name == _DELETE_NAME and self.sql_delete and isinstance(node.func, ast.Name) and len(node.args) == 1:
-            self._report(node, "G3 清理他人数据：delete() 未带 where 条件（单库叠加下会删掉他人数据）")
+            self._report(node, G3, "G3 清理他人数据：delete() 未带 where 条件（单库叠加下会删掉他人数据）")
         if name in _SQL_CALLS:
             self._check_raw_sql(node)
         self.generic_visit(node)
@@ -281,7 +318,7 @@ class _Scanner(ast.NodeVisitor):
         if isinstance(node.op, ast.Div) and isinstance(node.right, ast.Constant):
             value = node.right.value
             if isinstance(value, str) and value.endswith(self.rule.db_file_suffixes):
-                self._report(node, f"G1 自建 SQLite：临时目录派生库文件 {value}（应用共享夹具）")
+                self._report(node, G1, f"G1 自建 SQLite：临时目录派生库文件 {value}（应用共享夹具）")
         self.generic_visit(node)
 
     def _check_raw_sql(self, node: ast.Call) -> None:
@@ -296,28 +333,55 @@ class _Scanner(ast.NodeVisitor):
         if not isinstance(sql, str):
             return
         lowered = sql.lower()
+        for pattern in self.rule.ddl_sql_patterns:
+            if pattern in lowered:
+                self._report(node, G3, f"G3 共享库 DDL：原生 SQL 含 `{pattern.upper()}`（会打到共享库上他人数据）")
+                break
         if not any(f"{column} =" in lowered or f"{column} in" in lowered for column in self.rule.id_columns):
             return
         for arg in node.args[1:]:
             if isinstance(arg, ast.Dict) and any(
                 isinstance(value, ast.Constant) and isinstance(value.value, int) for value in arg.values
             ):
-                self._report(node, "G2 裸 int ID：原生 SQL 绑定 int 常量（应经 sqlite_id() 转补零字符串）")
+                self._report(node, G2, "G2 裸 int ID：原生 SQL 绑定 int 常量（应经 sqlite_id() 转补零字符串）")
 
-    def _report(self, node: ast.AST, message: str) -> None:
+    def _report(self, node: ast.AST, code: str, message: str) -> None:
         """记录问题（白名单作用域内跳过）。
 
         Args:
             node: 命中节点。
+            code: 规则码（G1 / G2 / G3 / G4）。
             message: 问题描述。
         """
         if self._allowed:
             return
-        self.problems.append(f"{self.rel_path}:{getattr(node, 'lineno', 0)}: {message}")
+        lineno = getattr(node, "lineno", 0)
+        self.problems.append(f"{self.rel_path}:{lineno}: {message}")
+        self.hits.append(Hit(self.rel_path, code, lineno, message))
+
+
+def scan_hits(rel_path: str, text: str, rule: TestDbIsolationRules) -> list[Hit]:
+    """扫描单个文件文本（返回结构化命中，供基线与增量判定使用）。
+
+    Args:
+        rel_path: 相对仓库根的 POSIX 路径。
+        text: 文件全文。
+        rule: 规则段。
+
+    Returns:
+        list[Hit]: 命中清单。
+    """
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return []
+    scanner = _Scanner(rel_path, rule, sql_delete=_has_sqlalchemy_delete(tree))
+    scanner.visit(tree)
+    return scanner.hits
 
 
 def scan_text(rel_path: str, text: str, rule: TestDbIsolationRules) -> list[str]:
-    """扫描单个文件文本。
+    """扫描单个文件文本（返回人读格式）。
 
     Args:
         rel_path: 相对仓库根的 POSIX 路径。
@@ -327,13 +391,81 @@ def scan_text(rel_path: str, text: str, rule: TestDbIsolationRules) -> list[str]
     Returns:
         list[str]: 问题清单（`路径:行号: 描述`）。
     """
+    return [f"{hit.file}:{hit.lineno}: {hit.message}" for hit in scan_hits(rel_path, text, rule)]
+
+
+def tally(hits: list[Hit]) -> dict[tuple[str, str], int]:
+    """把命中按「文件 + 规则码」聚合计数。
+
+    Args:
+        hits: 命中清单。
+
+    Returns:
+        dict[tuple[str, str], int]: 计数表。
+    """
+    table: dict[tuple[str, str], int] = {}
+    for hit in hits:
+        key = (hit.file, hit.code)
+        table[key] = table.get(key, 0) + 1
+    return table
+
+
+def read_baseline(path: Path, rule: TestDbIsolationRules) -> dict[tuple[str, str], int]:
+    """读取存量基线快照。
+
+    Args:
+        path: 基线文件路径（不存在视为空基线）。
+        rule: 规则段。
+
+    Returns:
+        dict[tuple[str, str], int]: 基线计数（文件 + 规则码 → 允许条数）。
+
+    Raises:
+        BaselineError: 文件存在但格式 / 版本 / 字段非法。
+    """
+    if not path.is_file():
+        return {}
     try:
-        tree = ast.parse(text)
-    except SyntaxError:
-        return []
-    scanner = _Scanner(rel_path, rule, sql_delete=_has_sqlalchemy_delete(tree))
-    scanner.visit(tree)
-    return scanner.problems
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise BaselineError(f"基线快照不可解析：{path}（{exc}）") from exc
+    if not isinstance(payload, dict) or payload.get("version") != rule.baseline_version:
+        raise BaselineError(f"基线快照版本非法（须为 {rule.baseline_version}）：{path}")
+    entries = payload.get("entries")
+    if not isinstance(entries, list):
+        raise BaselineError(f"基线快照 entries 非法（须为数组）：{path}")
+    counter: dict[tuple[str, str], int] = {}
+    for index, entry in enumerate(entries):
+        if not isinstance(entry, dict):
+            raise BaselineError(f"基线快照条目非法（第 {index + 1} 条须为对象）：{path}")
+        try:
+            key = (str(entry["file"]), str(entry["code"]))
+            count = int(entry.get("count", 1))
+        except (KeyError, TypeError, ValueError) as exc:
+            raise BaselineError(f"基线快照条目字段缺失或非法（第 {index + 1} 条）：{path}") from exc
+        if count < 1:
+            raise BaselineError(f"基线快照条目 count 非法（第 {index + 1} 条须为正整数）：{path}")
+        counter[key] = counter.get(key, 0) + count
+    return counter
+
+
+def write_baseline(path: Path, hits: list[Hit], rule: TestDbIsolationRules) -> int:
+    """以本次扫描结果重写基线快照（自然完成递减）。
+
+    Args:
+        path: 基线文件路径。
+        hits: 命中清单。
+        rule: 规则段。
+
+    Returns:
+        int: 写入的条目数。
+    """
+    counts = tally(hits)
+    entries = [{"file": file, "code": code, "count": count} for (file, code), count in sorted(counts.items())]
+    payload = {"version": rule.baseline_version, "entries": entries}
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return len(entries)
 
 
 def collect_own_db(rel_path: str, text: str, rule: TestDbIsolationRules) -> list[str]:
@@ -407,7 +539,7 @@ def _iter_files(root: Path, rule: TestDbIsolationRules, files_from: str) -> list
 
 
 def self_test(rule: TestDbIsolationRules) -> int:
-    """自检：合规 / 三条违规 / 白名单 / 注释与字符串误判五类向量。
+    """自检：合规 / 各类违规 / 白名单 / 注释与字符串误判向量。
 
     Args:
         rule: 规则段。
@@ -426,6 +558,10 @@ def self_test(rule: TestDbIsolationRules) -> int:
     engine = 'def test_b():\n    e = create_async_engine("x")\n'
     raw_sql = 'async def test_c(session):\n    await session.execute("SELECT 1 FROM t WHERE id = :id", {"id": 1001})\n'
     cleanup = "def test_d(meta):\n    meta.drop_all()\n"
+    create_all = "def test_g(meta):\n    meta.create_all(bind)\n"
+    truncate = 'async def test_h(session):\n    await session.execute("TRUNCATE TABLE t")\n'
+    drop_table = 'async def test_i(session):\n    await session.exec_driver_sql("drop table t")\n'
+    wait = "async def test_j():\n    await sleep(1.5)\n"
     cache_delete = "def test_e(cache):\n    cache.delete('k')\n"
     sql_delete = "from sqlalchemy import delete\n\n\ndef test_f(meta, table):\n    meta.execute(delete(table))\n"
     commented = "# create_async_engine('sqlite+aiosqlite:///x.db')\nDOC = 'delete() 与 drop_all() 的说明'\n"
@@ -443,6 +579,10 @@ def self_test(rule: TestDbIsolationRules) -> int:
         ("直接构造引擎", engine, 1),
         ("原生 SQL 裸 int ID", raw_sql, 1),
         ("无 where 清理", cleanup, 1),
+        ("建表 DDL", create_all, 1),
+        ("原生 TRUNCATE", truncate, 1),
+        ("原生 DROP TABLE", drop_table, 1),
+        ("假等待 sleep", wait, 1),
         ("SQL 无 where 删除", sql_delete, 1),
         ("非 SQL 的 delete 不误判", cache_delete, 0),
         ("注释与字符串不误判", commented, 0),
@@ -463,6 +603,7 @@ def run(
     as_self_test: bool = False,
     files_from: str = "",
     list_own_db: bool = False,
+    update_baseline: bool = False,
 ) -> int:
     """执行测试库隔离静态护栏。
 
@@ -471,6 +612,7 @@ def run(
         as_self_test: 是否只跑内置自检。
         files_from: 变更清单文件（空串表示全量）。
         list_own_db: 只导出白名单清单。
+        update_baseline: 按当前扫描结果重写存量基线。
 
     Returns:
         int: 退出码（0 通过 / 1 有问题 / 2 规则缺失）。
@@ -491,11 +633,37 @@ def run(
         for entry in entries:
             out(f"  - {entry}")
         return 0
-    problems = [problem for rel_path in files for problem in scan_text(rel_path, read_text(cfg.root / rel_path), rule)]
-    if problems:
-        out(f"[check_test_db_isolation] 不通过：{len(problems)} 项")
-        for item in problems:
-            out(f"  - {item}")
+    hits = [hit for rel_path in files for hit in scan_hits(rel_path, read_text(cfg.root / rel_path), rule)]
+    baseline_path = cfg.root / rule.baseline if rule.baseline else None
+    if update_baseline:
+        if baseline_path is None:
+            out("[check_test_db_isolation] 未配置 baseline，无法写入基线（请先在 [rules.test_db_isolation] 登记路径）")
+            return 2
+        count = write_baseline(baseline_path, hits, rule)
+        out(f"[check_test_db_isolation] 存量基线已更新：{count} 条 → {rule.baseline}")
+        return 0
+    try:
+        baseline = read_baseline(baseline_path, rule) if baseline_path is not None else {}
+    except BaselineError as exc:
+        out(f"[check_test_db_isolation] {exc}")
+        return 2
+    counts = tally(hits)
+    excess = {key: count - baseline.get(key, 0) for key, count in counts.items() if count > baseline.get(key, 0)}
+    if excess:
+        total = sum(excess.values())
+        out(f"[check_test_db_isolation] 不通过：新增 {total} 项（存量基线 {rule.baseline or '未启用'}）")
+        for hit in hits:
+            key = (hit.file, hit.code)
+            if key in excess and excess[key] > 0:
+                detail = f"{hit.file}:{hit.lineno}: {hit.message}"
+                out(f"  - {key[1]} 新增（基线 {baseline.get(key, 0)} → 现 {counts[key]}）：{detail}")
         return 1
-    out(f"[check_test_db_isolation] 通过：{len(files)} 个测试文件无自建库 / 裸 int ID / 清理他人数据")
+    shrink = {key: baseline[key] - counts.get(key, 0) for key in baseline if baseline[key] > counts.get(key, 0)}
+    if shrink:
+        out(
+            f"[check_test_db_isolation] 通过（{len(files)} 个测试文件）；"
+            f"另有 {len(shrink)} 个文件/规则码的存量比基线少，可跑 --update-baseline 递减基线"
+        )
+        return 0
+    out(f"[check_test_db_isolation] 通过：{len(files)} 个测试文件无自建库 / 裸 int ID / 清理他人数据 / 假等待")
     return 0

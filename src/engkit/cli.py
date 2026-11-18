@@ -217,7 +217,7 @@ def _build_parser() -> argparse.ArgumentParser:
             "product-literals",
         ):
             action.add_argument("--self-test", action="store_true", help="只跑内置判定向量")
-        if name in ("backend-base", "service-boundaries", "bare-collections", "product-literals"):
+        if name in ("backend-base", "service-boundaries", "bare-collections", "product-literals", "test-db-isolation"):
             action.add_argument("--update-baseline", action="store_true", help="按当前扫描结果重写基线")
         if name in ("service-boundaries", "bare-collections", "product-literals"):
             action.add_argument("--json", action="store_true", help="以 JSON 输出结果")
@@ -901,6 +901,7 @@ def _cmd_base(args: argparse.Namespace) -> int:
             as_self_test=bool(args.self_test),
             files_from=str(args.files_from),
             list_own_db=bool(args.list_own_db),
+            update_baseline=bool(args.update_baseline),
         )
     if name == "prototype-review":
         from .base import prototype_review
