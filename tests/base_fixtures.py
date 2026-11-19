@@ -57,6 +57,8 @@ whitelist = ["src/models/demo.py::size"]
 [rules.test_db_isolation]
 scan_targets = ["src", "svc"]
 allow_marker = "own_db"
+gate_bypass_targets = ["support", "support/single.py", "missing_dir"]
+base_modules = ["support/shared.py"]
 
 [rules.system_fields]
 table_dir = "docs/表"

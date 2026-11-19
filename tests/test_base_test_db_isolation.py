@@ -231,3 +231,81 @@ def test_edge_branches(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> No
     missing_rule = replace(rule, scan_targets=("absent_dir",))
     assert test_db_isolation._iter_files(tmp_path, missing_rule, "") == []
     capsys.readouterr()
+
+
+BYPASS = "def helper(url):\n    return create_async_engine(url)\n"
+MEMORY_ENGINE = 'def helper():\n    return create_async_engine("sqlite+aiosqlite://")\n'
+
+
+def test_gate_bypass_scan_and_incremental(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """G5：辅助模块按全文件扫（不限 `test_` 前缀），剪枝 / base_modules / 非扫描根都跳过。"""
+    write(
+        tmp_path,
+        {
+            "support/helpers.py": BYPASS,
+            "support/single.py": BYPASS,
+            "support/shared.py": BYPASS,
+            "support/memory.py": MEMORY_ENGINE,
+            "support/nested/__pycache__/skip.py": BYPASS,
+            "other/helpers.py": BYPASS,
+        },
+    )
+    cfg = config(tmp_path)
+    rule = cfg.test_db_isolation_rules
+    assert rule is not None
+
+    assert test_db_isolation._iter_gate_files(tmp_path, rule, "") == [
+        "support/helpers.py",
+        "support/memory.py",
+        "support/single.py",
+    ]
+    # 内存库豁免 / 直连命中 / 白名单放行 / 语法错误不崩
+    assert test_db_isolation.scan_gate_text("support/memory.py", MEMORY_ENGINE, rule) == []
+    assert len(test_db_isolation.scan_gate_text("support/helpers.py", BYPASS, rule)) == 1
+    own = 'import pytest\n\n\n@pytest.mark.own_db("独立库")\ndef helper(url):\n    return create_async_engine(url)\n'
+    assert test_db_isolation.scan_gate_text("support/own.py", own, rule) == []
+    assert test_db_isolation.scan_gate_hits("support/broken.py", "def (:\n", rule) == []
+
+    # 全量：2 处命中；剪枝 / 基座 / 非扫描根都不出现在报告里
+    assert test_db_isolation.run(cfg) == 1
+    text = capsys.readouterr().out
+    assert "support/helpers.py" in text and "support/single.py" in text
+    assert "memory.py" not in text and "shared.py" not in text
+    assert "skip.py" not in text and "other/helpers.py" not in text
+
+    # 增量清单：Windows 路径 / 非目标目录 / 缺失文件
+    changed = tmp_path / "changed.txt"
+    changed.write_text("support\\helpers.py\nother\\helpers.py\nmissing.py\n", encoding="utf-8")
+    assert test_db_isolation._iter_gate_files(tmp_path, rule, str(changed)) == ["support/helpers.py"]
+    assert test_db_isolation.run(cfg, files_from=str(changed)) == 1
+    capsys.readouterr()
+
+    # 管道清单（`-`）
+    monkeypatch.setattr(sys, "stdin", io.StringIO("support/single.py\nother/helpers.py\n"))
+    assert test_db_isolation._iter_gate_files(tmp_path, rule, "-") == ["support/single.py"]
+
+    # 白名单导出含辅助模块的模块级标记
+    own_file = "import pytest\n\npytestmark = [pytest.mark.own_db('辅助库')]\n"
+    write(tmp_path, {"support/own.py": own_file})
+    assert test_db_isolation.run(cfg, list_own_db=True) == 0
+    assert "support/own.py::<module>::辅助库" in capsys.readouterr().out
+
+
+def test_gate_bypass_baseline_only_shrinks(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """G5 命中进基线后通过；新增一处即报错（只减不增）。"""
+    write(tmp_path, {"support/helpers.py": BYPASS})
+    cfg = config(tmp_path)
+    rule = cfg.test_db_isolation_rules
+    assert rule is not None
+    cfg = replace(cfg, test_db_isolation_rules=replace(rule, baseline="baseline.json"))
+
+    assert test_db_isolation.run(cfg, update_baseline=True) == 0
+    assert test_db_isolation.run(cfg) == 0
+    capsys.readouterr()
+
+    write(tmp_path, {"support/extra.py": BYPASS})
+    assert test_db_isolation.run(cfg) == 1
+    out = capsys.readouterr().out
+    assert "G5" in out and "support/extra.py" in out

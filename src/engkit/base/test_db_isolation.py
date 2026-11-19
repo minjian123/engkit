@@ -9,6 +9,10 @@
 - **G3 清理他人数据**：单库叠加下不得 `drop_all` / `create_all` / `TRUNCATE` / `DROP TABLE` /
   无 `where` 的 `delete()`（白名单内的自建表除外）——建表与清表都会打到共享库上他人数据。
 - **G4 假等待**：用例里不得 `sleep()` 等状态；等待应以确定性断言（轮询条件 / 事件）替代。
+- **G5 直连共享库**（13_08 T7）：测试辅助模块（`gate_bypass_targets` 下的**全部** `.py`）不得
+  直接 `create_async_engine` / `create_engine` 去开共享库——这类直连不取读写门，长读事务会在
+  SQLite 层挡住走门的写者，表现为「有人持写门很久」。统一走 `gated_session` / `write_window`
+  或收进共享测试基座（`base_modules`）。
 
 判定用 AST（不用正则），避免注释与字符串误判；支持 `--files-from` 增量与 `--list-own-db` 白名单导出。
 扩围后的存量违规由 `[rules.test_db_isolation].baseline` 快照登记，**只减不增**：同一文件同一
@@ -41,6 +45,7 @@ G1 = "G1"
 G2 = "G2"
 G3 = "G3"
 G4 = "G4"
+G5 = "G5"
 """规则码（基线快照按「文件 + 规则码」计数，行号变动不失效）。"""
 
 
@@ -214,17 +219,26 @@ def _has_sqlalchemy_delete(tree: ast.Module) -> bool:
 class _Scanner(ast.NodeVisitor):
     """按作用域跟踪白名单 marker 的扫描器。"""
 
-    def __init__(self, rel_path: str, rule: TestDbIsolationRules, *, sql_delete: bool = False) -> None:
+    def __init__(
+        self,
+        rel_path: str,
+        rule: TestDbIsolationRules,
+        *,
+        sql_delete: bool = False,
+        gate_mode: bool = False,
+    ) -> None:
         """初始化。
 
         Args:
             rel_path: 相对仓库根的 POSIX 路径。
             rule: 规则段。
             sql_delete: 模块是否从 `sqlalchemy` 导入了 `delete`（只在该前提下判 G3 的 `delete()`）。
+            gate_mode: 只判 G5（直连共享库）；此时不判 G1-G4，避免同一行重复报两遍。
         """
         self.rel_path = rel_path
         self.rule = rule
         self.sql_delete = sql_delete
+        self.gate_mode = gate_mode
         self.problems: list[str] = []
         self.hits: list[Hit] = []
         self._allowed = 0
@@ -289,12 +303,22 @@ class _Scanner(ast.NodeVisitor):
         self.generic_visit(node)
 
     def visit_Call(self, node: ast.Call) -> None:
-        """G1 引擎构造 / G2 裸 int ID / G3 全表清理。
+        """G1 引擎构造 / G2 裸 int ID / G3 全表清理 / G5 直连共享库。
 
         Args:
             node: 调用节点。
         """
         name = _call_name(node)
+        if self.gate_mode:
+            if name in self.rule.engine_factories and not _engine_on_memory(node, self.rule):
+                self._report(
+                    node,
+                    G5,
+                    f"G5 直连共享库：{name}() 未经读写门（改用 gated_session / write_window，"
+                    "或收进 base_modules 声明的共享测试基座）",
+                )
+            self.generic_visit(node)
+            return
         if name in self.rule.engine_factories and not _engine_on_memory(node, self.rule):
             self._report(node, G1, f"G1 自建 SQLite：直接构造引擎 {name}()（应用共享夹具）")
         if name in self.rule.cleanup_calls:
@@ -392,6 +416,40 @@ def scan_text(rel_path: str, text: str, rule: TestDbIsolationRules) -> list[str]
         list[str]: 问题清单（`路径:行号: 描述`）。
     """
     return [f"{hit.file}:{hit.lineno}: {hit.message}" for hit in scan_hits(rel_path, text, rule)]
+
+
+def scan_gate_hits(rel_path: str, text: str, rule: TestDbIsolationRules) -> list[Hit]:
+    """扫描单个辅助模块的 G5（直连共享库）命中。
+
+    Args:
+        rel_path: 相对仓库根的 POSIX 路径。
+        text: 文件全文。
+        rule: 规则段。
+
+    Returns:
+        list[Hit]: G5 命中清单。
+    """
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return []
+    scanner = _Scanner(rel_path, rule, gate_mode=True)
+    scanner.visit(tree)
+    return scanner.hits
+
+
+def scan_gate_text(rel_path: str, text: str, rule: TestDbIsolationRules) -> list[str]:
+    """扫描单个辅助模块的 G5 命中（返回人读格式）。
+
+    Args:
+        rel_path: 相对仓库根的 POSIX 路径。
+        text: 文件全文。
+        rule: 规则段。
+
+    Returns:
+        list[str]: 问题清单（`路径:行号: 描述`）。
+    """
+    return [f"{hit.file}:{hit.lineno}: {hit.message}" for hit in scan_gate_hits(rel_path, text, rule)]
 
 
 def tally(hits: list[Hit]) -> dict[tuple[str, str], int]:
@@ -538,6 +596,50 @@ def _iter_files(root: Path, rule: TestDbIsolationRules, files_from: str) -> list
     return files
 
 
+def _iter_gate_files(root: Path, rule: TestDbIsolationRules, files_from: str) -> list[str]:
+    """枚举 G5（直连共享库）待扫描文件——`gate_bypass_targets` 下**全部** `.py`。
+
+    为什么与 `_iter_files` 分开：G1-G4 的语义是「用例文件」，而直连共享库恰恰发生在
+    `tests_support/` 这类非 `test_` 前缀的辅助模块里，按 `test_*.py` 过滤会整片漏掉。
+
+    Args:
+        root: 仓库根。
+        rule: 规则段。
+        files_from: 变更清单文件（空串表示全量）。
+
+    Returns:
+        list[str]: 相对路径清单（已剔除 `base_modules` 与剪枝目录）。
+    """
+    base_modules = set(rule.base_modules)
+    if files_from:
+        source = sys.stdin.read() if files_from == STDIN_LIST else read_text(Path(files_from))
+        candidates = [line.strip().replace("\\", "/") for line in source.splitlines() if line.strip().endswith(".py")]
+        return [
+            path
+            for path in candidates
+            if (root / path).is_file()
+            and path not in base_modules
+            and any(
+                path == target.rstrip("/") or path.startswith(f"{target.rstrip('/')}/")
+                for target in rule.gate_bypass_targets
+            )
+        ]
+    files: list[str] = []
+    for target in rule.gate_bypass_targets:
+        base = root / target
+        if not base.exists():
+            continue
+        candidates = [base] if base.is_file() else sorted(base.rglob("*.py"))
+        for path in candidates:
+            if set(path.relative_to(root).parts) & set(rule.exclude_parts):
+                continue
+            rel = path.relative_to(root).as_posix()
+            if rel in base_modules or rel in files:
+                continue
+            files.append(rel)
+    return files
+
+
 def self_test(rule: TestDbIsolationRules) -> int:
     """自检：合规 / 各类违规 / 白名单 / 注释与字符串误判向量。
 
@@ -593,7 +695,26 @@ def self_test(rule: TestDbIsolationRules) -> int:
         flag = "OK" if len(found) == expect else "FAIL"
         bad += flag == "FAIL"
         out(f"  [{flag}] {title}：期望 {expect} 项，实得 {len(found)} 项")
-    out(f"\n[check_test_db_isolation self-test] {'通过' if not bad else '不通过'}：断言用例 {len(vectors)} 个")
+    gate_vectors: list[tuple[str, str, int]] = [
+        ("直连共享库未取门", "def helper(url):\n    return create_async_engine(url)\n", 1),
+        ("内存库不算直连", 'def helper():\n    return create_async_engine("sqlite+aiosqlite://")\n', 0),
+        (
+            "辅助函数白名单放行",
+            "import pytest\n\n\n"
+            '@pytest.mark.own_db("确认是独立库")\n'
+            "def helper(url):\n    return create_async_engine(url)\n",
+            0,
+        ),
+    ]
+    for title, text, expect in gate_vectors:
+        found = scan_gate_text("backend/tests_support/demo.py", text, rule)
+        flag = "OK" if len(found) == expect else "FAIL"
+        bad += flag == "FAIL"
+        out(f"  [{flag}] G5 {title}：期望 {expect} 项，实得 {len(found)} 项")
+    out(
+        f"\n[check_test_db_isolation self-test] {'通过' if not bad else '不通过'}："
+        f"断言用例 {len(vectors) + len(gate_vectors)} 个"
+    )
     return 1 if bad else 0
 
 
@@ -625,15 +746,21 @@ def run(
     if as_self_test:
         return self_test(rule)
     files = _iter_files(cfg.root, rule, files_from)
+    gate_files = _iter_gate_files(cfg.root, rule, files_from)
     if list_own_db:
         entries = [
-            entry for rel_path in files for entry in collect_own_db(rel_path, read_text(cfg.root / rel_path), rule)
+            entry
+            for rel_path in [*files, *gate_files]
+            for entry in collect_own_db(rel_path, read_text(cfg.root / rel_path), rule)
         ]
         out(f"[check_test_db_isolation] 白名单 {len(entries)} 条")
         for entry in entries:
             out(f"  - {entry}")
         return 0
     hits = [hit for rel_path in files for hit in scan_hits(rel_path, read_text(cfg.root / rel_path), rule)]
+    hits.extend(
+        hit for rel_path in gate_files for hit in scan_gate_hits(rel_path, read_text(cfg.root / rel_path), rule)
+    )
     baseline_path = cfg.root / rule.baseline if rule.baseline else None
     if update_baseline:
         if baseline_path is None:
@@ -661,9 +788,12 @@ def run(
     shrink = {key: baseline[key] - counts.get(key, 0) for key in baseline if baseline[key] > counts.get(key, 0)}
     if shrink:
         out(
-            f"[check_test_db_isolation] 通过（{len(files)} 个测试文件）；"
+            f"[check_test_db_isolation] 通过（{len(files)} 个测试文件 + {len(gate_files)} 个辅助模块）；"
             f"另有 {len(shrink)} 个文件/规则码的存量比基线少，可跑 --update-baseline 递减基线"
         )
         return 0
-    out(f"[check_test_db_isolation] 通过：{len(files)} 个测试文件无自建库 / 裸 int ID / 清理他人数据 / 假等待")
+    out(
+        f"[check_test_db_isolation] 通过：{len(files)} 个测试文件 + {len(gate_files)} 个辅助模块"
+        "无自建库 / 裸 int ID / 清理他人数据 / 假等待 / 直连共享库"
+    )
     return 0

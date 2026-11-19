@@ -815,6 +815,7 @@ class TestDbIsolationRules:
         exclude_parts: 剪枝目录名。
         base_modules: 共享测试基座模块（相对仓根；这类模块的职责就是建库，不参与判定）。
         memory_literals: 内存库连接串（不落文件、不产生跨用例状态，不算自建库）。
+        gate_bypass_targets: 直连共享库规则（G5）的扫描根（相对仓根；**按全文件扫**，不限 `test_*.py`）。
         baseline: 存量基线 JSON 路径（相对仓根；空串不启用，命中全量报错）。
         baseline_version: 基线快照版本（格式变更时递增）。
     """
@@ -832,6 +833,7 @@ class TestDbIsolationRules:
     exclude_parts: tuple[str, ...] = ("__pycache__", ".venv", "node_modules", ".git")
     base_modules: tuple[str, ...] = ()
     memory_literals: tuple[str, ...] = ("sqlite://", "sqlite+aiosqlite://")
+    gate_bypass_targets: tuple[str, ...] = ()
     baseline: str = ""
     baseline_version: int = 1
 
@@ -1933,6 +1935,7 @@ def _parse_test_db_isolation_rules(table: dict[str, Any], where: str) -> TestDbI
             "exclude_parts",
             "base_modules",
             "memory_literals",
+            "gate_bypass_targets",
             "baseline",
             "baseline_version",
         ),
@@ -1952,6 +1955,7 @@ def _parse_test_db_isolation_rules(table: dict[str, Any], where: str) -> TestDbI
         exclude_parts=_strings(table, "exclude_parts", where, ("__pycache__", ".venv", "node_modules", ".git")),
         base_modules=_strings(table, "base_modules", where, ()),
         memory_literals=_strings(table, "memory_literals", where, ("sqlite://", "sqlite+aiosqlite://")),
+        gate_bypass_targets=_strings(table, "gate_bypass_targets", where, ()),
         baseline=_string(table, "baseline", where, ""),
         baseline_version=_scalar(table, "baseline_version", where, int, 1),
     )
