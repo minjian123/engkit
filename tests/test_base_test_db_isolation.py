@@ -293,6 +293,93 @@ def test_gate_bypass_scan_and_incremental(
     assert "support/own.py::<module>::辅助库" in capsys.readouterr().out
 
 
+G6_BYPASS = (
+    "async def test_k():\n"
+    "    engine = create_async_engine(url)\n"
+    "    async with engine.begin() as connection:\n"
+    "        await connection.execute('INSERT INTO t VALUES (1)')\n"
+)
+G6_WRAPPED = (
+    "async def test_l():\n"
+    "    engine = create_async_engine(url)\n"
+    "    async with shared_window(engine), engine.begin() as connection:\n"
+    "        await connection.execute('INSERT INTO t VALUES (1)')\n"
+)
+G6_RAW_SESSION = (
+    "async def test_m():\n"
+    "    engine = create_async_engine(url)\n"
+    "    factory = async_sessionmaker(engine)\n"
+    "    session = await factory()\n"
+    "    session.add(row)\n"
+    "    session.commit()\n"
+    "    await session.execute(update(table))\n"
+    "    await session.execute(select(table))\n"
+)
+G6_WITH_SESSION = (
+    "async def test_n():\n"
+    "    engine = create_async_engine(url)\n"
+    "    factory = async_sessionmaker(engine)\n"
+    "    async with factory() as session:\n"
+    "        session.add(row)\n"
+    "        thing().begin()\n"
+)
+G6_MARKED = (
+    "import pytest\n\npytestmark = [pytest.mark.own_db('独立库')]\n\n"
+    "async def test_o():\n"
+    "    engine = create_async_engine(url)\n"
+    "    async with engine.begin() as connection:\n"
+    "        await connection.execute('INSERT INTO t VALUES (1)')\n"
+)
+G6_LINE_COMMENT = (
+    "def helper(url):\n"
+    "    engine = create_async_engine(url)  # own_db: 内存库\n"
+    "    async with engine.begin() as connection:\n"
+    "        connection.execute('DELETE FROM t')\n"
+)
+G6_ODD_ASSIGN = (
+    "def helper(url):\n"
+    "    engine: object\n"
+    "    pair = (create_async_engine(url), 1)\n"
+    "    factory = async_sessionmaker(create_async_engine(url))\n"
+    "    return pair, factory\n"
+)
+
+
+def test_gate_bypass_write_rule(tmp_path: Path) -> None:
+    """G6：门外直连写 / 裸会话写拦下；门区间内、白名单、行尾 own_db 放行。"""
+    rule = config(tmp_path).test_db_isolation_rules
+    assert rule is not None
+
+    bypass = test_db_isolation.scan_hits("src/tests/test_k.py", G6_BYPASS, rule)
+    assert [(hit.code) for hit in bypass] == ["G1", "G6"]
+
+    wrapped = test_db_isolation.scan_hits("src/tests/test_l.py", G6_WRAPPED, rule)
+    assert [hit.code for hit in wrapped] == ["G1"]
+
+    raw = test_db_isolation.scan_hits("src/tests/test_m.py", G6_RAW_SESSION, rule)
+    # 引擎 1 + 会话写 3（add / commit / execute(update)）；execute(select) 是读，不判
+    assert [hit.code for hit in raw] == ["G1", "G6", "G6", "G6"]
+
+    on_with = test_db_isolation.scan_hits("src/tests/test_n.py", G6_WITH_SESSION, rule)
+    # 引擎 1 + 裸会话 add（`with factory() as session` 绑定）+ `thing().begin()` 非 Name 不判
+    assert [hit.code for hit in on_with] == ["G1", "G6"]
+
+    assert test_db_isolation.scan_hits("src/tests/test_o.py", G6_MARKED, rule) == []
+
+    commented = test_db_isolation.scan_hits("src/tests/test_p.py", G6_LINE_COMMENT, rule)
+    # 行尾 own_db 只放行 G6；G1 仍按「直接构造引擎」判
+    assert [hit.code for hit in commented] == ["G1"]
+
+    odd = test_db_isolation.scan_hits("src/tests/test_q.py", G6_ODD_ASSIGN, rule)
+    assert [hit.code for hit in odd] == ["G1", "G1"]
+
+    scanner = test_db_isolation._Scanner("src/tests/test_r.py", rule)
+    assert scanner._line_mentions_own_db(ast.Name(id="x")) is False  # pyright: ignore[reportPrivateUsage]
+    assert test_db_isolation._is_write_expression(ast.Constant(value="  insert into t values (1)")) is True
+    assert test_db_isolation._is_write_expression(ast.Constant(value="select 1")) is False
+    assert test_db_isolation._is_write_expression(ast.Call(func=ast.Name(id="select"), args=[], keywords=[])) is False
+
+
 def test_gate_bypass_baseline_only_shrinks(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     """G5 命中进基线后通过；新增一处即报错（只减不增）。"""
     write(tmp_path, {"support/helpers.py": BYPASS})

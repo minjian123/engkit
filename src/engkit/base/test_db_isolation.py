@@ -13,6 +13,11 @@
   直接 `create_async_engine` / `create_engine` 去开共享库——这类直连不取读写门，长读事务会在
   SQLite 层挡住走门的写者，表现为「有人持写门很久」。统一走 `gated_session` / `write_window`
   或收进共享测试基座（`base_modules`）。
+- **G6 门外写**（13_08 续修）：本文件内创建的裸引擎（`create_async_engine` / `create_engine`）
+  及其派生的裸会话，`begin()` / `connect()` / `add()` / `flush()` / `commit()` / 写语句
+  **必须**在门区间内（`shared_window` / `write_window` / `gate_scope` / `gated_session` /
+  `write_session` / `gated_sessionmaker`）。门外写会让 SQLite 写锁在门已放之后仍被占着，
+  别的 worker 门内写只能报 `database is locked`；`own_db` 作用域与行尾 `# own_db:` 放行。
 
 判定用 AST（不用正则），避免注释与字符串误判；支持 `--files-from` 增量与 `--list-own-db` 白名单导出。
 扩围后的存量违规由 `[rules.test_db_isolation].baseline` 快照登记，**只减不增**：同一文件同一
@@ -46,7 +51,33 @@ G2 = "G2"
 G3 = "G3"
 G4 = "G4"
 G5 = "G5"
+G6 = "G6"
 """规则码（基线快照按「文件 + 规则码」计数，行号变动不失效）。"""
+
+_SESSION_FACTORIES = ("async_sessionmaker", "sessionmaker")
+"""裸会话工厂构造名（对应门版是 `gated_sessionmaker`）。"""
+
+_GATE_WRAPPERS = (
+    "shared_window",
+    "write_window",
+    "platform_db_write",
+    "tenant_db_write",
+    "db_access_gate",
+    "gate_scope",
+    "gated_session",
+    "write_session",
+    "gated_sessionmaker",
+)
+"""门区间入口名：这些调用所在的 `with` 块视为已在门内。"""
+
+_WRITE_SESSION_METHODS = ("add", "add_all", "delete", "flush", "commit")
+"""裸会话上的写入口名（进入会话即写 / 提交）。"""
+
+_WRITE_SQL_HEADS = ("INSERT", "UPDATE", "DELETE", "REPLACE", "CREATE", "DROP", "ALTER", "TRUNCATE")
+"""原生 SQL 的写语句开头（G6 判定范围）。"""
+
+_WRITE_BUILDERS = ("insert", "update", "delete")
+"""SQLAlchemy 写语句构造名（G6 判定范围）。"""
 
 
 class Hit(NamedTuple):
@@ -54,7 +85,7 @@ class Hit(NamedTuple):
 
     Attributes:
         file: 相对仓库根的 POSIX 路径。
-        code: 规则码（G1 / G2 / G3 / G4）。
+        code: 规则码（G1-G6）。
         lineno: 行号（仅用于报告）。
         message: 问题描述。
     """
@@ -197,6 +228,21 @@ def _call_name(node: ast.AST) -> str:
     return ""
 
 
+def _is_write_expression(node: ast.AST) -> bool:
+    """判断表达式是否写语句（原生 SQL 字符串或 SQLAlchemy 写构造）。
+
+    Args:
+        node: 表达式节点。
+
+    Returns:
+        bool: 写语句为 True。
+    """
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        words = node.value.lstrip().split()
+        return bool(words) and words[0].upper() in _WRITE_SQL_HEADS
+    return _call_name(node) in _WRITE_BUILDERS
+
+
 def _has_sqlalchemy_delete(tree: ast.Module) -> bool:
     """判断模块是否从 `sqlalchemy` 导入了 `delete`（G3 的判定前提）。
 
@@ -226,6 +272,7 @@ class _Scanner(ast.NodeVisitor):
         *,
         sql_delete: bool = False,
         gate_mode: bool = False,
+        lines: list[str] | None = None,
     ) -> None:
         """初始化。
 
@@ -233,18 +280,24 @@ class _Scanner(ast.NodeVisitor):
             rel_path: 相对仓库根的 POSIX 路径。
             rule: 规则段。
             sql_delete: 模块是否从 `sqlalchemy` 导入了 `delete`（只在该前提下判 G3 的 `delete()`）。
-            gate_mode: 只判 G5（直连共享库）；此时不判 G1-G4，避免同一行重复报两遍。
+            gate_mode: 只判 G5 / G6（直连共享库与门外写）；此时不判 G1-G4，避免同一行重复报两遍。
+            lines: 源文件按行切分（用于识别行尾 `own_db` 放行注释）。
         """
         self.rel_path = rel_path
         self.rule = rule
         self.sql_delete = sql_delete
         self.gate_mode = gate_mode
+        self.lines = lines or []
         self.problems: list[str] = []
         self.hits: list[Hit] = []
         self._allowed = 0
+        self._gated = 0
+        self._raw_engines: set[str] = set()
+        self._raw_factories: set[str] = set()
+        self._raw_sessions: set[str] = set()
 
     def _scope(self, node: ast.AST) -> None:
-        """进入作用域：带 marker 时整体放行。
+        """进入作用域：带 marker 时整体放行；函数作用域的追踪集合不外泄给兄弟函数。
 
         Args:
             node: 模块 / 类 / 函数节点。
@@ -252,9 +305,18 @@ class _Scanner(ast.NodeVisitor):
         allowed = _is_allowed(node, self.rule.allow_marker)
         if not allowed and isinstance(node, ast.Module):
             allowed = bool(_pytestmark_reason(node, self.rule.allow_marker))
+        is_function = isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        saved = (self._raw_engines, self._raw_factories, self._raw_sessions) if is_function else None
+        if saved is not None:
+            # 继承模块级引擎（模块级建库、函数里写是同一份库），但不把本函数新建的会话泄漏给兄弟函数
+            self._raw_engines = set(saved[0])
+            self._raw_factories = set(saved[1])
+            self._raw_sessions = set(saved[2])
         self._allowed += 1 if allowed else 0
         self.generic_visit(node)
         self._allowed -= 1 if allowed else 0
+        if saved is not None:
+            self._raw_engines, self._raw_factories, self._raw_sessions = saved
 
     def visit_Module(self, node: ast.Module) -> None:
         """模块作用域。
@@ -288,6 +350,109 @@ class _Scanner(ast.NodeVisitor):
         """
         self._scope(node)
 
+    def _line_mentions_own_db(self, node: ast.AST) -> bool:
+        """判断命中行是否带 `own_db` 放行注释（行尾 `# own_db: 理由`）。
+
+        为什么支持行尾注释：`tests_support` 里的辅助模块用「模块内建内存库」做各用例的干净
+        数据面，不是 `test_*.py`，无法挂 `pytestmark`；行尾注释是它们现有的放行写法。
+
+        Args:
+            node: 命中节点。
+
+        Returns:
+            bool: 该行文本含白名单 marker 为 True。
+        """
+        lineno = getattr(node, "lineno", 0)
+        if not 1 <= lineno <= len(self.lines):
+            return False
+        return self.rule.allow_marker in self.lines[lineno - 1]
+
+    def _track_assignment(self, targets: list[ast.expr], value: ast.expr | None) -> None:
+        """追踪「本地裸引擎 → 裸会话工厂 → 裸会话」的赋值链（G6 判定输入）。
+
+        Args:
+            targets: 赋值目标。
+            value: 赋值右侧。
+        """
+        if value is None:
+            return
+        names = [target.id for target in targets if isinstance(target, ast.Name)]
+        if not names:
+            return
+        if _call_name(value) in self.rule.engine_factories:
+            call = value
+            if (
+                isinstance(call, ast.Call)
+                and not self._line_mentions_own_db(call)
+                and not _engine_on_memory(call, self.rule)
+            ):
+                self._raw_engines.update(names)
+            return
+        if _call_name(value) in _SESSION_FACTORIES:
+            call = value
+            first = call.args[0] if isinstance(call, ast.Call) and call.args else None
+            if isinstance(first, ast.Name) and first.id in self._raw_engines:
+                self._raw_factories.update(names)
+            return
+        inner = value.value if isinstance(value, ast.Await) else value
+        if isinstance(inner, ast.Call) and isinstance(inner.func, ast.Name) and inner.func.id in self._raw_factories:
+            self._raw_sessions.update(names)
+
+    def visit_Assign(self, node: ast.Assign) -> None:
+        """追踪赋值链。
+
+        Args:
+            node: 赋值节点。
+        """
+        self._track_assignment(node.targets, node.value)
+        self.generic_visit(node)
+
+    def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
+        """追踪带注解赋值。
+
+        Args:
+            node: 注解赋值节点。
+        """
+        self._track_assignment([node.target], node.value)
+        self.generic_visit(node)
+
+    def _visit_with(self, node: ast.With | ast.AsyncWith) -> None:
+        """进入 `with` 块：门区间入口内的写视为合规；同时记录裸会话绑定。
+
+        Args:
+            node: `with` / `async with` 节点。
+        """
+        wrapped = any(
+            isinstance(item.context_expr, ast.Call) and _call_name(item.context_expr) in _GATE_WRAPPERS
+            for item in node.items
+        )
+        for item in node.items:
+            target = item.optional_vars
+            expression = item.context_expr
+            if isinstance(target, ast.Name) and isinstance(expression, ast.Call):
+                func = expression.func
+                if isinstance(func, ast.Name) and func.id in self._raw_factories:
+                    self._raw_sessions.add(target.id)
+        self._gated += 1 if wrapped else 0
+        self.generic_visit(node)
+        self._gated -= 1 if wrapped else 0
+
+    def visit_With(self, node: ast.With) -> None:
+        """同步 `with` 块。
+
+        Args:
+            node: `with` 节点。
+        """
+        self._visit_with(node)
+
+    def visit_AsyncWith(self, node: ast.AsyncWith) -> None:
+        """异步 `with` 块。
+
+        Args:
+            node: `async with` 节点。
+        """
+        self._visit_with(node)
+
     def visit_Constant(self, node: ast.Constant) -> None:
         """G1：连接串字面量（内存库不算自建库）。
 
@@ -303,7 +468,7 @@ class _Scanner(ast.NodeVisitor):
         self.generic_visit(node)
 
     def visit_Call(self, node: ast.Call) -> None:
-        """G1 引擎构造 / G2 裸 int ID / G3 全表清理 / G5 直连共享库。
+        """G1 引擎构造 / G2 裸 int ID / G3 全表清理 / G5 直连共享库 / G6 门外写。
 
         Args:
             node: 调用节点。
@@ -317,6 +482,7 @@ class _Scanner(ast.NodeVisitor):
                     f"G5 直连共享库：{name}() 未经读写门（改用 gated_session / write_window，"
                     "或收进 base_modules 声明的共享测试基座）",
                 )
+            self._check_gate_bypass(node)
             self.generic_visit(node)
             return
         if name in self.rule.engine_factories and not _engine_on_memory(node, self.rule):
@@ -331,7 +497,47 @@ class _Scanner(ast.NodeVisitor):
             self._report(node, G3, "G3 清理他人数据：delete() 未带 where 条件（单库叠加下会删掉他人数据）")
         if name in _SQL_CALLS:
             self._check_raw_sql(node)
+        self._check_gate_bypass(node)
         self.generic_visit(node)
+
+    def _check_gate_bypass(self, node: ast.Call) -> None:
+        """G6：直连引擎 / 裸会话的写在门区间外执行。
+
+        只判**本文件内创建的裸引擎**及其派生的裸会话（fixture 传入的引擎多为门代理，
+        静态层面无法区分，误报代价高于收益）；`own_db` 作用域或行尾注释放行。
+
+        Args:
+            node: 调用节点。
+        """
+        if self._gated or self._allowed:
+            return
+        func = node.func
+        if not isinstance(func, ast.Attribute) or not isinstance(func.value, ast.Name):
+            return
+        owner = func.value.id
+        if func.attr in ("begin", "connect") and owner in self._raw_engines:
+            self._report(
+                node,
+                G6,
+                f"G6 门外写：直连引擎 {owner}.{func.attr}() 未经读写门"
+                "（改用 shared_window / gated_session，或把引擎收进共享测试基座）",
+            )
+            return
+        if owner not in self._raw_sessions:
+            return
+        if func.attr in _WRITE_SESSION_METHODS:
+            self._report(
+                node,
+                G6,
+                f"G6 门外写：裸会话 {owner}.{func.attr}() 未经读写门（改用 gated_session / write_session）",
+            )
+            return
+        if func.attr in _SQL_CALLS and node.args and _is_write_expression(node.args[0]):
+            self._report(
+                node,
+                G6,
+                f"G6 门外写：裸会话 {owner}.{func.attr}() 执行写语句且未经读写门（改用 gated_session / write_session）",
+            )
 
     def visit_BinOp(self, node: ast.BinOp) -> None:
         """G1：`tmp_path / "x.db"` 派生临时库。
@@ -399,7 +605,7 @@ def scan_hits(rel_path: str, text: str, rule: TestDbIsolationRules) -> list[Hit]
         tree = ast.parse(text)
     except SyntaxError:
         return []
-    scanner = _Scanner(rel_path, rule, sql_delete=_has_sqlalchemy_delete(tree))
+    scanner = _Scanner(rel_path, rule, sql_delete=_has_sqlalchemy_delete(tree), lines=text.splitlines())
     scanner.visit(tree)
     return scanner.hits
 
@@ -433,7 +639,7 @@ def scan_gate_hits(rel_path: str, text: str, rule: TestDbIsolationRules) -> list
         tree = ast.parse(text)
     except SyntaxError:
         return []
-    scanner = _Scanner(rel_path, rule, gate_mode=True)
+    scanner = _Scanner(rel_path, rule, gate_mode=True, lines=text.splitlines())
     scanner.visit(tree)
     return scanner.hits
 
@@ -597,9 +803,9 @@ def _iter_files(root: Path, rule: TestDbIsolationRules, files_from: str) -> list
 
 
 def _iter_gate_files(root: Path, rule: TestDbIsolationRules, files_from: str) -> list[str]:
-    """枚举 G5（直连共享库）待扫描文件——`gate_bypass_targets` 下**全部** `.py`。
+    """枚举 G5 / G6 待扫描文件——`gate_bypass_targets` 下**全部** `.py`。
 
-    为什么与 `_iter_files` 分开：G1-G4 的语义是「用例文件」，而直连共享库恰恰发生在
+    为什么与 `_iter_files` 分开：G1-G4 的语义是「用例文件」，而直连共享库与门外写恰恰发生在
     `tests_support/` 这类非 `test_` 前缀的辅助模块里，按 `test_*.py` 过滤会整片漏掉。
 
     Args:
@@ -672,6 +878,39 @@ def self_test(rule: TestDbIsolationRules) -> int:
         'pytestmark = [pytest.mark.own_db("整份文件的建库即被测")]\n\n\n'
         "def test_a():\n    e = create_async_engine('x')\n"
     )
+    gate_bypass = (
+        "async def test_k():\n"
+        "    engine = create_async_engine(url)\n"
+        "    async with engine.begin() as connection:\n"
+        "        await connection.execute('INSERT INTO t VALUES (1)')\n"
+    )
+    gate_wrapped = (
+        "async def test_l():\n"
+        "    engine = create_async_engine(url)\n"
+        "    async with shared_window(engine), engine.begin() as connection:\n"
+        "        await connection.execute('INSERT INTO t VALUES (1)')\n"
+    )
+    raw_session = (
+        "async def test_m():\n"
+        "    engine = create_async_engine(url)\n"
+        "    factory = async_sessionmaker(engine)\n"
+        "    session = factory()\n"
+        "    session.add(row)\n"
+    )
+    marked_bypass = (
+        "import pytest\n\n"
+        'pytestmark = [pytest.mark.own_db("独立库")]\n\n\n'
+        "async def test_n():\n"
+        "    engine = create_async_engine(url)\n"
+        "    async with engine.begin() as connection:\n"
+        "        await connection.execute('INSERT INTO t VALUES (1)')\n"
+    )
+    lines_own_db = (
+        "def helper(url):\n"
+        "    engine = create_async_engine(url)  # own_db: 模块内建内存库\n"
+        "    async with engine.begin() as connection:\n"
+        "        connection.execute('INSERT INTO t VALUES (1)')\n"
+    )
     vectors: list[tuple[str, str, int]] = [
         ("合规样本", good, 0),
         ("白名单放行", own, 0),
@@ -688,6 +927,11 @@ def self_test(rule: TestDbIsolationRules) -> int:
         ("SQL 无 where 删除", sql_delete, 1),
         ("非 SQL 的 delete 不误判", cache_delete, 0),
         ("注释与字符串不误判", commented, 0),
+        ("门外直连写", gate_bypass, 2),
+        ("门区间内直连写放行", gate_wrapped, 1),
+        ("门外裸会话写", raw_session, 2),
+        ("独立库白名单放行门外写", marked_bypass, 0),
+        ("行尾 own_db 放行门外写", lines_own_db, 1),
     ]
     bad = 0
     for title, text, expect in vectors:
@@ -704,6 +948,14 @@ def self_test(rule: TestDbIsolationRules) -> int:
             '@pytest.mark.own_db("确认是独立库")\n'
             "def helper(url):\n    return create_async_engine(url)\n",
             0,
+        ),
+        (
+            "辅助函数门外直连写",
+            "def helper(url):\n"
+            "    engine = create_async_engine(url)\n"
+            "    with engine.begin() as connection:\n"
+            "        connection.execute('INSERT INTO t VALUES (1)')\n",
+            2,
         ),
     ]
     for title, text, expect in gate_vectors:
@@ -794,6 +1046,6 @@ def run(
         return 0
     out(
         f"[check_test_db_isolation] 通过：{len(files)} 个测试文件 + {len(gate_files)} 个辅助模块"
-        "无自建库 / 裸 int ID / 清理他人数据 / 假等待 / 直连共享库"
+        "无自建库 / 裸 int ID / 清理他人数据 / 假等待 / 直连共享库 / 门外写"
     )
     return 0
