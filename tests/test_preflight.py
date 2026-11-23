@@ -358,14 +358,14 @@ def test_run_selected_rounds_exhausted(cfg, monkeypatch) -> None:
 
 
 def test_run_selected_pytest_failure(cfg) -> None:
-    """测试失败即透传退出码（不进扩圈）。"""
+    """测试失败即返回 1（13_09 起「跑完全部批再汇总」，不再透传单批退出码）。"""
     assert (
         preflight.run_selected(
             cfg,
             changed=["backend/libs/pkg_a/src/pkg_a/util.py"],
             pytest_cmd=f'{_PY} -c "raise SystemExit(5)"',
         )
-        == 5
+        == 1
     )
 
 

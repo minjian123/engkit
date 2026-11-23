@@ -15,6 +15,7 @@ import subprocess
 import sys
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -48,6 +49,22 @@ PUSH_MAX_TOTAL_SECONDS = 600.0
 
 _PYTEST_ELAPSED_RE = re.compile(r"in ([\d.]+)s \(0:")
 """pytest 结论行的单轮耗时（供耗时汇总逐轮列出）。"""
+
+_PYTEST_PASSED_RE = re.compile(r"(\d+) passed")
+"""pytest 结论行的通过数。"""
+
+_PYTEST_FAILED_RE = re.compile(r"(\d+) failed")
+"""pytest 结论行的失败数。"""
+
+_PYTEST_ERROR_RE = re.compile(r"(\d+) errors?")
+"""pytest 结论行的错误数。"""
+
+_LOCK_MARK = "database is locked"
+"""SQLite 锁冲突标记（批级摘要按它计数，不改任何等待参数）。"""
+
+_BATCH_SERVICE_TOP = 3
+"""批级摘要里展示的服务构成个数。"""
+
 
 DEFAULT_ARGV_BUDGET = 6000
 """单条 pytest 命令的路径参数字符预算。
@@ -701,16 +718,114 @@ def gate_command(cfg: Config, data_file: Path, report: Path, modules: list[str],
     return [*shlex.split(interpreter), "-c", script]
 
 
-def pack_paths(paths: list[str], budget: int = DEFAULT_ARGV_BUDGET) -> list[list[str]]:
+def service_key(path: str) -> str:
+    """推导测试目标所属的服务键（只影响装箱顺序，不改变跑哪些用例）。
+
+    Args:
+        path: 测试目标（相对 pytest 工作目录，posix 分隔）。
+
+    Returns:
+        str: `services/<名>/…` → `<名>`；`libs/<名>/…` → `libs-<名>`；其余 → `other`。
+    """
+    parts = path.split("/")
+    if len(parts) > 1 and parts[0] == "services":
+        return parts[1]
+    if len(parts) > 1 and parts[0] == "libs":
+        return f"libs-{parts[1]}"
+    return "other"
+
+
+def bucket_by_service(paths: list[str]) -> list[list[str]]:
+    """按服务键分桶，桶按字符总量降序（等量按服务键升序，保证确定性）。
+
+    Args:
+        paths: 测试目标（相对 pytest 工作目录）。
+
+    Returns:
+        list[list[str]]: 各服务的目标（桶内保持输入顺序）；空输入返回空列表。
+    """
+    buckets: dict[str, list[str]] = {}
+    for path in paths:
+        buckets.setdefault(service_key(path), []).append(path)
+    ordered = sorted(buckets.items(), key=lambda item: (-sum(len(path) + 1 for path in item[1]), item[0]))
+    return [items for _key, items in ordered]
+
+
+def _lightest_open_batch(sizes: list[int], sealed: list[bool]) -> int | None:
+    """取当前字符量最小的非封口批（同量取序号小的，保证确定性）。
+
+    Args:
+        sizes: 各批已用字符数。
+        sealed: 各批是否已封口（封口批不再接收新目标）。
+
+    Returns:
+        int | None: 批序号；无可用批返回 `None`。
+    """
+    best: int | None = None
+    for index, size in enumerate(sizes):
+        if sealed[index]:
+            continue
+        if best is None or size < sizes[best]:
+            best = index
+    return best
+
+
+def _pack_round_robin(paths: list[str], budget: int) -> list[list[str]]:
+    """按服务分桶轮转、逐桶取一个目标放进「当前字符最少」的批。
+
+    轮转保证写密集服务不会整批聚堆（13_09 的末批写热点放大器）；单个目标自身超预算时
+    独占一批并封口，避免把它与别的目标拼进同一条超长命令。
+
+    Args:
+        paths: 测试目标（相对 pytest 工作目录）。
+        budget: 单批字符预算（含分隔空格）。
+
+    Returns:
+        list[list[str]]: 分批结果；空输入返回空列表。
+    """
+    buckets = bucket_by_service(paths)
+    batches: list[list[str]] = []
+    sizes: list[int] = []
+    sealed: list[bool] = []
+    while True:
+        advanced = False
+        for bucket in buckets:
+            if not bucket:
+                continue
+            advanced = True
+            path = bucket.pop(0)
+            cost = len(path) + 1
+            if cost > budget:
+                batches.append([path])
+                sizes.append(cost)
+                sealed.append(True)
+                continue
+            target = _lightest_open_batch(sizes, sealed)
+            if target is None or sizes[target] + cost > budget:
+                batches.append([path])
+                sizes.append(cost)
+                sealed.append(False)
+                continue
+            batches[target].append(path)
+            sizes[target] += cost
+        if not advanced:
+            break
+    return batches
+
+
+def pack_paths(paths: list[str], budget: int = DEFAULT_ARGV_BUDGET, *, round_robin: bool = False) -> list[list[str]]:
     """按字符预算把测试路径分批，保证单条命令不超命令行长度上限。
 
     Args:
         paths: 测试路径（相对 pytest 工作目录）。
         budget: 单批字符预算（含分隔空格）。
+        round_robin: 是否按服务分桶轮转装箱（缺省关闭，保持顺序贪婪）。
 
     Returns:
-        list[list[str]]: 分批结果（保持原顺序；`paths` 为空返回空列表）。
+        list[list[str]]: 分批结果（顺序贪婪保序；`paths` 为空返回空列表）。
     """
+    if round_robin:
+        return _pack_round_robin(paths, budget)
     batches: list[list[str]] = []
     current: list[str] = []
     size = 0
@@ -725,6 +840,101 @@ def pack_paths(paths: list[str], budget: int = DEFAULT_ARGV_BUDGET) -> list[list
     if current:
         batches.append(current)
     return batches
+
+
+def _pack_batches(targets: list[str], budget: int) -> list[list[str]]:
+    """定向档装箱：优先轮转，碎片化超出「顺序批数 +1」时回退顺序装箱。
+
+    Args:
+        targets: 目录折叠后的目标（相对 pytest 工作目录）。
+        budget: 单批字符预算。
+
+    Returns:
+        list[list[str]]: 分批结果（目标集合与输入等价）。
+    """
+    sequential = pack_paths(targets, budget)
+    rotated = pack_paths(targets, budget, round_robin=True)
+    if len(rotated) <= len(sequential) + 1:
+        if len(rotated) > len(sequential):
+            out(
+                f"[test-selection] 轮转装箱：{len(rotated)} 批（顺序装箱 {len(sequential)} 批，"
+                f"碎片化 +1 在允许上限内；写热点已分散）"
+            )
+        return rotated
+    out(f"[test-selection] 轮转装箱碎片化过多（{len(rotated)} 批 > 顺序 {len(sequential)} 批 + 1） ⇒ 回退顺序装箱")
+    return sequential
+
+
+def batch_counts(lines: list[str]) -> tuple[int, int, int]:
+    """从批输出里取（通过, 失败, 错误）计数（只看最后一条结论行）。
+
+    Args:
+        lines: 该批 pytest 输出行。
+
+    Returns:
+        tuple[int, int, int]: 计数；无结论行返回 `(0, 0, 0)`。
+    """
+    for line in reversed(lines):
+        passed = _PYTEST_PASSED_RE.search(line)
+        failed = _PYTEST_FAILED_RE.search(line)
+        errors = _PYTEST_ERROR_RE.search(line)
+        if passed is None and failed is None and errors is None:
+            continue
+        return (
+            int(passed.group(1)) if passed else 0,
+            int(failed.group(1)) if failed else 0,
+            int(errors.group(1)) if errors else 0,
+        )
+    return (0, 0, 0)
+
+
+def batch_services(batch: list[str]) -> str:
+    """列出批内服务构成（按目标数降序，最多前三个）。
+
+    Args:
+        batch: 该批目标。
+
+    Returns:
+        str: 形如 `platform/notification/libs-bms_core`；空批返回 `—`。
+    """
+    counts: dict[str, int] = {}
+    for path in batch:
+        key = service_key(path)
+        counts[key] = counts.get(key, 0) + 1
+    ordered = sorted(counts.items(), key=lambda item: (-item[1], item[0]))[:_BATCH_SERVICE_TOP]
+    return "/".join(key for key, _count in ordered) or "—"
+
+
+def print_batch_summary(index: int, total: int, batch: list[str], lines: list[str], seconds: float) -> None:
+    """打印批级摘要（目标数 / 服务构成 / 耗时 / 结果 / `database is locked` 次数）。
+
+    Args:
+        index: 批序号（从 1 起）。
+        total: 本轮批数。
+        batch: 该批目标。
+        lines: 该批 pytest 输出行。
+        seconds: 该批耗时（秒）。
+    """
+    passed, failed, errors = batch_counts(lines)
+    locked = sum(1 for line in lines if _LOCK_MARK in line)
+    out(
+        f"[test-selection] 第 {index}/{total} 批完成：目标 {len(batch)} · 服务 {batch_services(batch)} · "
+        f"{seconds:.1f}s · {passed} 通过 / {failed} 失败 / {errors} 错误 · database is locked {locked} 次"
+    )
+
+
+def _batch_labels(indexes: list[int]) -> str:
+    """把批序号列表渲染成中文列举（空列表返回「无」）。
+
+    Args:
+        indexes: 批序号（升序）。
+
+    Returns:
+        str: 形如 `第 1、3 批`；空列表返回 `无`。
+    """
+    if not indexes:
+        return "无"
+    return "第 " + "、".join(str(index) for index in indexes) + " 批"
 
 
 def _ancestor_dirs(rel: str) -> list[str]:
@@ -906,6 +1116,7 @@ def run_selected(
     depth: str = "",
     allow_full: bool = False,
     offload_to_ci: bool = False,
+    budget_probe: Callable[[], float] | None = None,
 ) -> int:
     """推导 → 跑 pytest → 覆盖率判定 → 扩圈 → 退化 → 度量。
 
@@ -929,9 +1140,12 @@ def run_selected(
         allow_full: 是否允许退化 / 强制全量（仅 CI / 显式全量档传 True；开发环与推送环恒 False）。
         offload_to_ci: 分层归位模式（推送环传 True）：不退化全量，超出可推导影响面的部分
             显式登记「交 CI 全量回归」；扩圈无果判失败而不是全量重跑。
+        budget_probe: 剩余预算探针（只在某批失败后调用：返回 ≤0 即停止后续批并登记「未跑批次」；
+            不改变每批的超时时长，预算语义与数值一律不动）。
 
     Returns:
-        int: pytest 退出码 / 覆盖率或推导异常 1 / 超时 124 / 本地要求全量 2。
+        int: pytest 退出码 / 覆盖率或推导异常 1 / 超时 124 / 本地要求全量 2；任一已跑批次失败
+            且全部批次跑完时返回 1（一次给全失败清单，不早退）。
     """
     if force_full and not allow_full:
         if offload_to_ci:
@@ -1027,10 +1241,14 @@ def run_selected(
         if cov_enabled:
             coverage.cleanup(data_file)
         targets = collapse_to_dirs(workdir, test_paths, threshold=cfg.guard.dir_test_threshold)
-        batches = pack_paths(targets, cfg.pytest.argv_budget)
+        batches = _pack_batches(targets, cfg.pytest.argv_budget)
         out(f"\n[test-selection] 第 {rounds} 轮：{len(test_paths)} 个测试文件（{len(batches)} 批）")
         if len(targets) != len(test_paths):
             out(f"[test-selection] 目录聚合：{len(test_paths)} 个文件 → {len(targets)} 个目标")
+        failed_batches: list[int] = []
+        passed_batches: list[int] = []
+        unrun_batches: list[int] = []
+        failure_codes: dict[int, int] = {}
         for index, batch in enumerate(batches, start=1):
             # `-rf --tb=long`：失败摘要 + 完整 traceback 一次给全，避免「先看失败、再带参数重跑」。
             argv = [*shlex.split(command_prefix), "-q", "-rf", "--tb=long", *batch]
@@ -1041,16 +1259,36 @@ def run_selected(
             if len(batches) > 1:
                 out(f"[test-selection] 第 {index}/{len(batches)} 批：{len(batch)} 个目标")
             out(f"  $ {' '.join(argv)}")
+            started = time.monotonic()
             try:
-                code, _lines = run_pytest_once(argv, workdir, env, limit)
+                code, lines = run_pytest_once(argv, workdir, env, limit)
             except subprocess.TimeoutExpired:
                 out(f"[test-selection] 单批超时（{limit:.0f}s）⇒ 中止；长命令交 CI")
                 print_metrics(len(test_paths), result.total, degraded, rounds, len(cov_modules))
                 return TIMEOUT_CODE
+            print_batch_summary(index, len(batches), batch, lines, time.monotonic() - started)
 
-            if code != 0:
-                print_metrics(len(test_paths), result.total, degraded, rounds, len(cov_modules))
-                return code
+            if code == 0:
+                passed_batches.append(index)
+                continue
+            failed_batches.append(index)
+            failure_codes[index] = code
+            # 一批失败不早退：跑完全部批次再汇总，一次给全失败清单（13_09 T4）。
+            # 仅在「剩余预算已耗尽」时停后续批，并把它们登记为「未跑批次」。
+            if budget_probe is not None and budget_probe() <= 0:
+                unrun_batches = list(range(index + 1, len(batches) + 1))
+                out("[test-selection] 剩余预算已耗尽 ⇒ 停止后续批，未跑批次在汇总中列出")
+                break
+
+        if failed_batches:
+            codes = "、".join(f"第 {index} 批退出码 {failure_codes[index]}" for index in failed_batches)
+            out("[test-selection] 分批汇总（失败明细已在各批完整输出）")
+            out(f"[test-selection] 失败批：{_batch_labels(failed_batches)}（{codes}）")
+            out(f"[test-selection] 通过批：{_batch_labels(passed_batches)}")
+            out(f"[test-selection] 未跑批：{_batch_labels(unrun_batches)}")
+            out("[test-selection] 有批次失败 ⇒ 不进入覆盖率判定与扩圈（数据不完整，先把失败一次改完）")
+            print_metrics(len(test_paths), result.total, degraded, rounds, len(cov_modules))
+            return 1
         if not cov_enabled:
             print_metrics(len(test_paths), result.total, degraded, rounds, 0)
             return 0
@@ -1140,6 +1378,11 @@ def _run_scoped_step(
     sink: list[str] = []
     out("\n[engkit] 后端测试：定向（选测 + 覆盖率门禁 + 扩圈）")
     test_started = time.monotonic()
+
+    def _remaining() -> float:
+        """本步剩余预算（总预算余额 − 本步已耗；只在某批失败后由执行器探一次）。"""
+        return budget.remaining() - (time.monotonic() - test_started)
+
     with contextlib.redirect_stdout(Tee(sys.stdout, sink)):
         code = run_selected(
             cfg,
@@ -1150,6 +1393,7 @@ def _run_scoped_step(
             depth="closure",
             allow_full=False,
             offload_to_ci=True,
+            budget_probe=_remaining,
         )
     budget.record("后端测试：定向（选测 + 覆盖率门禁 + 扩圈）", time.monotonic() - test_started, "tests")
     budget.test_rounds.extend(float(item) for item in _PYTEST_ELAPSED_RE.findall("\n".join(sink)))
