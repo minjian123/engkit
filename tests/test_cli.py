@@ -461,16 +461,24 @@ def test_coverage_changed_cli_reports_runtime_error(repo: Path, monkeypatch, cap
 
 
 def test_base_snowflake_and_test_db_isolation_dispatch(repo: Path, monkeypatch) -> None:
-    """`base` 的 `snowflake-ids` / `test-db-isolation` 分派到对应校验器（参数透传）。"""
-    from engkit.base import snowflake_ids, test_db_isolation
+    """`base` 的 `snowflake-ids` / `test-db-isolation` / `test-premises` 分派到对应校验器（参数透传）。"""
+    from engkit.base import snowflake_ids, test_db_isolation, test_premises
 
     seen: dict[str, object] = {}
     monkeypatch.setattr(snowflake_ids, "run", lambda cfg, **kw: seen.update(snowflake=kw) or 0)
     monkeypatch.setattr(test_db_isolation, "run", lambda cfg, **kw: seen.update(db=kw) or 0)
+    monkeypatch.setattr(test_premises, "run", lambda cfg, **kw: seen.update(premises=kw) or 0)
     assert cli.main(["base", "snowflake-ids", "--root", str(repo), "--self-test"]) == 0
     assert cli.main(["base", "test-db-isolation", "--root", str(repo), "--self-test", "--list-own-db"]) == 0
+    assert cli.main(["base", "test-premises", "--root", str(repo), "--self-test", "--list-own-db"]) == 0
     assert seen["snowflake"] == {"as_self_test": True, "files_from": ""}
-    assert seen["db"] == {"as_self_test": True, "files_from": "", "list_own_db": True}
+    assert seen["db"] == {"as_self_test": True, "files_from": "", "list_own_db": True, "update_baseline": False}
+    assert seen["premises"] == {
+        "as_self_test": True,
+        "files_from": "",
+        "list_own_db": True,
+        "update_baseline": False,
+    }
 
 
 def test_package_version_lazy_and_unknown_attribute() -> None:

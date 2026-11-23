@@ -891,6 +891,45 @@ class ProductLiteralsRules:
 
 
 @dataclass(frozen=True)
+class TestPremisesRules:
+    """测试状态前提护栏规则（`[rules.test_premises]`，任务 13_10）。
+
+    Attributes:
+        scan_targets: 扫描根清单（相对仓根；`test_*.py` 与 `conftest.py` 一并扫）。
+        own_marker: 独占库白名单 marker 名（如 `own_db`）。
+        own_scopes: `own_db` 允许的 scope 分类（缺省或越界即违规）。
+        external_scope: 真外部服务联调的分类词（必须同时带 integration 标记）。
+        integration_marker: 外部联调用例的标记名（`integration`）。
+        aggregate_keys: 整表口径的聚合字段名（与 `0` 比较即命中 P1）。
+        list_keys: 整表口径的列表字段名（与空列表全等即命中 P1）。
+        premise_marker: 豁免注释前缀（`# premise: <类别> <说明>`，说明必须非空）。
+        fixture_names: 装配夹具名清单（P2 判定范围）。
+        resident_scopes: 装配夹具允许的常驻粒度。
+        lock_calls: 跨进程锁入口名（P4 判定范围）。
+        lock_targets: 禁止整段独占的锁名清单。
+        exclude_parts: 剪枝目录名。
+        baseline: 存量基线 JSON 路径（相对仓根；空串不启用，命中全量报错）。
+        baseline_version: 基线快照版本（格式变更时递增）。
+    """
+
+    scan_targets: tuple[str, ...]
+    own_marker: str = "own_db"
+    own_scopes: tuple[str, ...] = ("ddl", "create", "seed", "topology", "memory", "external")
+    external_scope: str = "external"
+    integration_marker: str = "integration"
+    aggregate_keys: tuple[str, ...] = ("total", "count")
+    list_keys: tuple[str, ...] = ("list", "items", "rows")
+    premise_marker: str = "premise:"
+    fixture_names: tuple[str, ...] = ("service_app",)
+    resident_scopes: tuple[str, ...] = ("module", "session", "package")
+    lock_calls: tuple[str, ...] = ("file_lock",)
+    lock_targets: tuple[str, ...] = ("platform-global-state",)
+    exclude_parts: tuple[str, ...] = ("__pycache__", ".venv", "node_modules", ".git")
+    baseline: str = ""
+    baseline_version: int = 1
+
+
+@dataclass(frozen=True)
 class Config:
     """一份仓配置。
 
@@ -950,6 +989,7 @@ class Config:
     collections_rules: BareCollectionsRules | None = None
     snowflake_ids_rules: SnowflakeIdsRules | None = None
     test_db_isolation_rules: TestDbIsolationRules | None = None
+    test_premises_rules: TestPremisesRules | None = None
     system_fields_rules: SystemFieldsRules | None = None
     prototype_rules: PrototypeRules | None = None
     env_example_rules: EnvExampleRules | None = None
@@ -1961,6 +2001,56 @@ def _parse_test_db_isolation_rules(table: dict[str, Any], where: str) -> TestDbI
     )
 
 
+def _parse_test_premises_rules(table: dict[str, Any], where: str) -> TestPremisesRules:
+    """解析 `[rules.test_premises]`。
+
+    Args:
+        table: 子表。
+        where: 位置描述。
+
+    Returns:
+        TestPremisesRules: 规则。
+    """
+    _check_keys(
+        table,
+        (
+            "scan_targets",
+            "own_marker",
+            "own_scopes",
+            "external_scope",
+            "integration_marker",
+            "aggregate_keys",
+            "list_keys",
+            "premise_marker",
+            "fixture_names",
+            "resident_scopes",
+            "lock_calls",
+            "lock_targets",
+            "exclude_parts",
+            "baseline",
+            "baseline_version",
+        ),
+        where,
+    )
+    return TestPremisesRules(
+        scan_targets=_strings(table, "scan_targets", where),
+        own_marker=_string(table, "own_marker", where, "own_db"),
+        own_scopes=_strings(table, "own_scopes", where, ("ddl", "create", "seed", "topology", "memory", "external")),
+        external_scope=_string(table, "external_scope", where, "external"),
+        integration_marker=_string(table, "integration_marker", where, "integration"),
+        aggregate_keys=_strings(table, "aggregate_keys", where, ("total", "count")),
+        list_keys=_strings(table, "list_keys", where, ("list", "items", "rows")),
+        premise_marker=_string(table, "premise_marker", where, "premise:"),
+        fixture_names=_strings(table, "fixture_names", where, ("service_app",)),
+        resident_scopes=_strings(table, "resident_scopes", where, ("module", "session", "package")),
+        lock_calls=_strings(table, "lock_calls", where, ("file_lock",)),
+        lock_targets=_strings(table, "lock_targets", where, ("platform-global-state",)),
+        exclude_parts=_strings(table, "exclude_parts", where, ("__pycache__", ".venv", "node_modules", ".git")),
+        baseline=_string(table, "baseline", where, ""),
+        baseline_version=_scalar(table, "baseline_version", where, int, 1),
+    )
+
+
 def _parse_metrics_rules(table: dict[str, Any], where: str) -> MetricsRules:
     """解析 `[rules.metrics]`。
 
@@ -2140,6 +2230,7 @@ def parse(raw: dict[str, Any], path: Path) -> Config:
     collections_rule_set: BareCollectionsRules | None = None
     snowflake_ids_rule_set: SnowflakeIdsRules | None = None
     test_db_isolation_rule_set: TestDbIsolationRules | None = None
+    test_premises_rule_set: TestPremisesRules | None = None
     system_fields_rule_set: SystemFieldsRules | None = None
     prototype_rule_set: PrototypeRules | None = None
     env_example_rule_set: EnvExampleRules | None = None
@@ -2156,6 +2247,7 @@ def parse(raw: dict[str, Any], path: Path) -> Config:
         "bare_collections",
         "snowflake_ids",
         "test_db_isolation",
+        "test_premises",
         "system_fields",
         "prototype",
         "env_example",
@@ -2189,6 +2281,10 @@ def parse(raw: dict[str, Any], path: Path) -> Config:
     if "test_db_isolation" in rules:
         test_db_isolation_rule_set = _parse_test_db_isolation_rules(
             _table(rules, "test_db_isolation", "rules.test_db_isolation"), "rules.test_db_isolation"
+        )
+    if "test_premises" in rules:
+        test_premises_rule_set = _parse_test_premises_rules(
+            _table(rules, "test_premises", "rules.test_premises"), "rules.test_premises"
         )
     if "system_fields" in rules:
         system_fields_rule_set = _parse_system_fields_rules(
@@ -2359,6 +2455,7 @@ def parse(raw: dict[str, Any], path: Path) -> Config:
         collections_rules=collections_rule_set,
         snowflake_ids_rules=snowflake_ids_rule_set,
         test_db_isolation_rules=test_db_isolation_rule_set,
+        test_premises_rules=test_premises_rule_set,
         system_fields_rules=system_fields_rule_set,
         prototype_rules=prototype_rule_set,
         env_example_rules=env_example_rule_set,

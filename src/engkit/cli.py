@@ -194,6 +194,7 @@ def _build_parser() -> argparse.ArgumentParser:
         ("bare-collections", "集合声明白名单"),
         ("snowflake-ids", "雪花 ID（模型列 / 契约字段）静态护栏"),
         ("test-db-isolation", "测试库隔离（自建库 / 裸 int ID / 清理他人数据）静态护栏"),
+        ("test-premises", "测试状态前提（空库前提 / 逐例重装 / 独占库分类 / 全局状态锁）静态护栏"),
         ("system-fields", "系统字段（form_key / data_source_key）"),
         ("prototype-review", "界面「实现 ↔ 原型」对照"),
         ("env-example", "环境变量模板键位"),
@@ -211,13 +212,21 @@ def _build_parser() -> argparse.ArgumentParser:
             "bare-collections",
             "snowflake-ids",
             "test-db-isolation",
+            "test-premises",
             "system-fields",
             "prototype-review",
             "env-example",
             "product-literals",
         ):
             action.add_argument("--self-test", action="store_true", help="只跑内置判定向量")
-        if name in ("backend-base", "service-boundaries", "bare-collections", "product-literals", "test-db-isolation"):
+        if name in (
+            "backend-base",
+            "service-boundaries",
+            "bare-collections",
+            "product-literals",
+            "test-db-isolation",
+            "test-premises",
+        ):
             action.add_argument("--update-baseline", action="store_true", help="按当前扫描结果重写基线")
         if name in ("service-boundaries", "bare-collections", "product-literals"):
             action.add_argument("--json", action="store_true", help="以 JSON 输出结果")
@@ -230,6 +239,7 @@ def _build_parser() -> argparse.ArgumentParser:
             "bare-collections",
             "snowflake-ids",
             "test-db-isolation",
+            "test-premises",
             "product-literals",
         ):
             action.add_argument(
@@ -245,6 +255,12 @@ def _build_parser() -> argparse.ArgumentParser:
                 "--list-own-db",
                 action="store_true",
                 help="只导出 own_db 白名单清单（文件 / 用例 / 理由）",
+            )
+        if name == "test-premises":
+            action.add_argument(
+                "--list-own-db",
+                action="store_true",
+                help="只导出 own_db 台账（文件 / 作用域 / scope / 理由）",
             )
         if name == "service-boundaries":
             action.add_argument("--no-cache", action="store_true", help="不用表声明索引缓存（现扫全量）")
@@ -897,6 +913,16 @@ def _cmd_base(args: argparse.Namespace) -> int:
         from .base import test_db_isolation
 
         return test_db_isolation.run(
+            cfg,
+            as_self_test=bool(args.self_test),
+            files_from=str(args.files_from),
+            list_own_db=bool(args.list_own_db),
+            update_baseline=bool(args.update_baseline),
+        )
+    if name == "test-premises":
+        from .base import test_premises
+
+        return test_premises.run(
             cfg,
             as_self_test=bool(args.self_test),
             files_from=str(args.files_from),

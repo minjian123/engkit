@@ -60,6 +60,10 @@ allow_marker = "own_db"
 gate_bypass_targets = ["support", "support/single.py", "missing_dir"]
 base_modules = ["support/shared.py"]
 
+[rules.test_premises]
+scan_targets = ["src", "svc"]
+baseline = "premises_baseline.json"
+
 [rules.system_fields]
 table_dir = "docs/表"
 row_form_key = "form_key"
