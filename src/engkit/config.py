@@ -914,7 +914,7 @@ class TestPremisesRules:
 
     scan_targets: tuple[str, ...]
     own_marker: str = "own_db"
-    own_scopes: tuple[str, ...] = ("ddl", "create", "seed", "topology", "memory", "external")
+    own_scopes: tuple[str, ...] = ("ddl", "create", "seed", "topology", "memory", "external", "destructive")
     external_scope: str = "external"
     integration_marker: str = "integration"
     aggregate_keys: tuple[str, ...] = ("total", "count")
@@ -2035,7 +2035,12 @@ def _parse_test_premises_rules(table: dict[str, Any], where: str) -> TestPremise
     return TestPremisesRules(
         scan_targets=_strings(table, "scan_targets", where),
         own_marker=_string(table, "own_marker", where, "own_db"),
-        own_scopes=_strings(table, "own_scopes", where, ("ddl", "create", "seed", "topology", "memory", "external")),
+        own_scopes=_strings(
+            table,
+            "own_scopes",
+            where,
+            ("ddl", "create", "seed", "topology", "memory", "external", "destructive"),
+        ),
         external_scope=_string(table, "external_scope", where, "external"),
         integration_marker=_string(table, "integration_marker", where, "integration"),
         aggregate_keys=_strings(table, "aggregate_keys", where, ("total", "count")),
