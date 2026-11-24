@@ -907,6 +907,12 @@ class TestPremisesRules:
         resident_scopes: 装配夹具允许的常驻粒度。
         lock_calls: 跨进程锁入口名（P4 判定范围）。
         lock_targets: 禁止整段独占的锁名清单。
+        state_attr_names: 应用状态容器属性名（P5；属性链倒数第二段命中即算 `app.state`）。
+        override_attrs: 依赖覆盖容器属性名（P5；下标写 / 整体写 / 容器方法均命中）。
+        state_methods: 禁止在状态容器上调用的变更方法（P5）。
+        setattr_calls: 反射写属性入口名（P5；目标为上述三类容器时命中）。
+        settings_getters: 全局配置取值入口名（P5；其返回值不得写属性）。
+        settings_names: 全局配置变量名（P5；该变量的属性不得写）。
         exclude_parts: 剪枝目录名。
         baseline: 存量基线 JSON 路径（相对仓根；空串不启用，命中全量报错）。
         baseline_version: 基线快照版本（格式变更时递增）。
@@ -924,6 +930,12 @@ class TestPremisesRules:
     resident_scopes: tuple[str, ...] = ("module", "session", "package")
     lock_calls: tuple[str, ...] = ("file_lock",)
     lock_targets: tuple[str, ...] = ("platform-global-state",)
+    state_attr_names: tuple[str, ...] = ("state",)
+    override_attrs: tuple[str, ...] = ("dependency_overrides",)
+    state_methods: tuple[str, ...] = ("update", "clear", "pop", "setdefault")
+    setattr_calls: tuple[str, ...] = ("setattr", "delattr")
+    settings_getters: tuple[str, ...] = ("get_settings",)
+    settings_names: tuple[str, ...] = ("settings",)
     exclude_parts: tuple[str, ...] = ("__pycache__", ".venv", "node_modules", ".git")
     baseline: str = ""
     baseline_version: int = 1
@@ -2026,6 +2038,12 @@ def _parse_test_premises_rules(table: dict[str, Any], where: str) -> TestPremise
             "resident_scopes",
             "lock_calls",
             "lock_targets",
+            "state_attr_names",
+            "override_attrs",
+            "state_methods",
+            "setattr_calls",
+            "settings_getters",
+            "settings_names",
             "exclude_parts",
             "baseline",
             "baseline_version",
@@ -2050,6 +2068,12 @@ def _parse_test_premises_rules(table: dict[str, Any], where: str) -> TestPremise
         resident_scopes=_strings(table, "resident_scopes", where, ("module", "session", "package")),
         lock_calls=_strings(table, "lock_calls", where, ("file_lock",)),
         lock_targets=_strings(table, "lock_targets", where, ("platform-global-state",)),
+        state_attr_names=_strings(table, "state_attr_names", where, ("state",)),
+        override_attrs=_strings(table, "override_attrs", where, ("dependency_overrides",)),
+        state_methods=_strings(table, "state_methods", where, ("update", "clear", "pop", "setdefault")),
+        setattr_calls=_strings(table, "setattr_calls", where, ("setattr", "delattr")),
+        settings_getters=_strings(table, "settings_getters", where, ("get_settings",)),
+        settings_names=_strings(table, "settings_names", where, ("settings",)),
         exclude_parts=_strings(table, "exclude_parts", where, ("__pycache__", ".venv", "node_modules", ".git")),
         baseline=_string(table, "baseline", where, ""),
         baseline_version=_scalar(table, "baseline_version", where, int, 1),

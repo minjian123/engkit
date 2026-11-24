@@ -14,6 +14,11 @@
   `integration` 标记时成立，避免被当成逃生口。
 - **P4 全局状态独占锁**：`file_lock("platform-global-state")` 这类「整段全局状态独占」在真实系统
   里不存在，使用面清零（存量进基线只减不增）。
+- **P5 全局装配状态写入**：用例不得改「全系统装配一次」的结果——`app.dependency_overrides[...] = ...`
+  （含整体赋值、`.clear()` / `.update()` / `.pop()`）、`app.state.<属性> = ...`、
+  `get_settings()` 返回值或 `settings` 变量的属性赋值，以及 `monkeypatch.setattr(...)` / `delattr`
+  指向这三类容器。真实运行里装配结果由系统装配器唯一决定，用例改它等于伪造运行形态。
+  确认为了让装配模型统一，P5 **不留行内豁免**，存量只能靠基线递减。
 
 判定用 AST（不用正则），避免注释与字符串误判；支持 `--files-from` 增量、`--list-own-db` 台账导出、
 `--update-baseline` 递减。存量违规由 `[rules.test_premises].baseline` 快照登记，**只减不增**。
@@ -39,6 +44,7 @@ P1 = "P1"
 P2 = "P2"
 P3 = "P3"
 P4 = "P4"
+P5 = "P5"
 """规则码（基线快照按「文件 + 规则码」计数，行号变动不失效）。"""
 
 _FIXTURE_DECORATORS = ("fixture",)
@@ -87,6 +93,47 @@ def _call_name(node: ast.AST) -> str:
     if isinstance(node.func, ast.Attribute):
         return node.func.attr
     return ""
+
+
+def _dotted(node: ast.AST) -> str:
+    """拼属性链文本（`app.state.x` / `get_settings()`），用于匹配容器。
+
+    Args:
+        node: 表达式节点。
+
+    Returns:
+        str: 点分文本；无法识别的节点返回空串。
+    """
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        base = _dotted(node.value)
+        return f"{base}.{node.attr}" if base else node.attr
+    if isinstance(node, ast.Call):
+        base = _dotted(node.func)
+        return f"{base}()" if base else ""
+    return ""
+
+
+def _write_targets(node: ast.AST) -> list[ast.expr]:
+    """展开赋值目标（元组 / 列表解包逐个取出）。
+
+    Args:
+        node: 赋值目标节点。
+
+    Returns:
+        list[ast.expr]: 叶子目标清单。
+    """
+    if isinstance(node, (ast.Tuple, ast.List)):
+        leaves: list[ast.expr] = []
+        for element in node.elts:
+            leaves.extend(_write_targets(element))
+        return leaves
+    if isinstance(node, ast.Starred):
+        return [node.value]
+    if isinstance(node, ast.expr):
+        return [node]
+    return []
 
 
 def _is_empty_literal(node: ast.AST) -> bool:
@@ -429,7 +476,7 @@ class _Scanner(ast.NodeVisitor):
             )
 
     def visit_Call(self, node: ast.Call) -> None:
-        """P4：全局状态独占锁。
+        """P4：全局状态独占锁；P5：容器方法与反射写属性。
 
         Args:
             node: 调用节点。
@@ -443,7 +490,102 @@ class _Scanner(ast.NodeVisitor):
                     f"P4 全局状态独占锁：{_call_name(node)}(`{first.value}`) 把整段全局状态独占；"
                     "真实系统里没有这种窗口，改用唯一命名空间 + 只处理本用例数据",
                 )
+        if isinstance(node.func, ast.Attribute):
+            container = _dotted(node.func.value)
+            if node.func.attr in self.rule.state_methods and self._is_state_container(container):
+                self._report(
+                    node.lineno,
+                    P5,
+                    f"P5 全局装配状态写入：`{ast.unparse(node)}` 用容器方法改了装配结果"
+                    "（装配结果由系统装配器唯一决定，改为请求级注入或自带应用）",
+                )
+            elif node.func.attr in self.rule.setattr_calls and node.args:
+                target = _dotted(node.args[0])
+                if self._is_state_container(target):
+                    self._report(
+                        node.lineno,
+                        P5,
+                        f"P5 全局装配状态写入：`{ast.unparse(node)}` 反射改了装配结果"
+                        "（装配结果由系统装配器唯一决定，改为请求级注入或自带应用）",
+                    )
         self.generic_visit(node)
+
+    def visit_Assign(self, node: ast.Assign) -> None:
+        """P5：赋值写装配状态（含解包目标）。
+
+        Args:
+            node: 赋值节点。
+        """
+        for target in node.targets:
+            self._check_write(target, node.lineno)
+        self.generic_visit(node)
+
+    def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
+        """P5：带注解赋值写装配状态（仅当有右值）。
+
+        Args:
+            node: 赋值节点。
+        """
+        if node.value is not None:
+            self._check_write(node.target, node.lineno)
+        self.generic_visit(node)
+
+    def visit_AugAssign(self, node: ast.AugAssign) -> None:
+        """P5：增量赋值写装配状态。
+
+        Args:
+            node: 赋值节点。
+        """
+        self._check_write(node.target, node.lineno)
+        self.generic_visit(node)
+
+    def _is_state_container(self, text: str) -> bool:
+        """判表达式是否指向受保护的装配状态容器。
+
+        Args:
+            text: 属性链文本（`app.state` / `app.dependency_overrides` / `get_settings()`）。
+
+        Returns:
+            bool: 命中装配状态返回 True。
+        """
+        if not text:
+            return False
+        if text.endswith("()"):
+            return text[:-2].split(".")[-1] in self.rule.settings_getters
+        segments = text.split(".")
+        if segments[0] in self.rule.settings_names:
+            return True
+        last = segments[-1]
+        if last in self.rule.override_attrs:
+            return True
+        if len(segments) >= 2 and last in self.rule.state_attr_names:
+            return True
+        return len(segments) >= 2 and segments[-2] in self.rule.state_attr_names
+
+    def _check_write(self, target: ast.expr, lineno: int) -> None:
+        """P5：赋值目标是否落在装配状态上。
+
+        Args:
+            target: 赋值目标节点。
+            lineno: 行号。
+        """
+        for leaf in _write_targets(target):
+            container = False
+            if isinstance(leaf, ast.Subscript):
+                base: ast.expr = leaf.value
+                while isinstance(base, ast.Subscript):
+                    base = base.value
+                container = self._is_state_container(_dotted(base))
+            elif isinstance(leaf, ast.Attribute):
+                container = self._is_state_container(_dotted(leaf)) or self._is_state_container(_dotted(leaf.value))
+            if not container:
+                continue
+            self._report(
+                lineno,
+                P5,
+                f"P5 全局装配状态写入：`{ast.unparse(leaf)}` 改了装配结果"
+                "（装配结果由系统装配器唯一决定，改为请求级注入或自带应用）",
+            )
 
     def visit_Assert(self, node: ast.Assert) -> None:
         """P1：整表口径断言无「本次写入」前提。
@@ -729,6 +871,19 @@ def self_test(rule: TestPremisesRules) -> int:
     )
     p4_hit = 'def test_a():\n    with file_lock("platform-global-state", timeout=180.0):\n        pass\n'
     p4_other = 'def test_a():\n    with file_lock("other-lock", timeout=180.0):\n        pass\n'
+    p5_override = "def test_a(app, dep, fn):\n    app.dependency_overrides[dep] = fn\n"
+    p5_override_all = "def test_a(app):\n    app.dependency_overrides = {}\n"
+    p5_state = "def test_a(app):\n    app.state.registry = None\n"
+    p5_state_method = "def test_a(app):\n    app.state.registry.clear()\n"
+    p5_pop = "def test_a(app, key):\n    app.dependency_overrides.pop(key)\n"
+    p5_setattr_state = 'def test_a(app, monkeypatch):\n    monkeypatch.setattr(app.state, "x", 1)\n'
+    p5_setattr_settings = 'def test_a(settings, monkeypatch):\n    monkeypatch.setattr(settings, "x", 1)\n'
+    p5_settings_var = "def test_a(settings):\n    settings.max_active = 3\n"
+    p5_settings_getter = "def test_a():\n    get_settings().max_active = 3\n"
+    p5_read = "def test_a(app):\n    assert app.state.registry is None\n    assert app.dependency_overrides == {}\n"
+    p5_setattr_other = 'def test_a(client, monkeypatch):\n    monkeypatch.setattr(client, "x", 1)\n'
+    p5_local_cache = 'def test_a():\n    cache = {}\n    cache["k"] = 1\n    state = {}\n    state["k"] = 1\n'
+    p5_getter_copy = "def test_a():\n    assert get_settings().model_copy().x == 1\n"
     broken = "def (:\n"
     module_mark = "import pytest\n\npytestmark = [pytest.mark.own_db('整份文件建库即被测', scope='ddl')]\n"
     module_mark_missing = "import pytest\n\npytestmark = [pytest.mark.own_db('整份文件建库即被测')]\n"
@@ -750,6 +905,19 @@ def self_test(rule: TestPremisesRules) -> int:
         ("external 带 integration 放行", p3_external_ok, []),
         ("全局状态锁被拦", p4_hit, [P4]),
         ("其它锁不误判", p4_other, []),
+        ("依赖覆盖下标写被拦", p5_override, [P5]),
+        ("依赖覆盖整体写被拦", p5_override_all, [P5]),
+        ("应用状态属性写被拦", p5_state, [P5]),
+        ("应用状态容器方法被拦", p5_state_method, [P5]),
+        ("依赖覆盖弹出被拦", p5_pop, [P5]),
+        ("反射改应用状态被拦", p5_setattr_state, [P5]),
+        ("反射改全局配置被拦", p5_setattr_settings, [P5]),
+        ("全局配置变量属性写被拦", p5_settings_var, [P5]),
+        ("全局配置取值链写被拦", p5_settings_getter, [P5]),
+        ("只读装配状态不误判", p5_read, []),
+        ("反射改普通对象不误判", p5_setattr_other, []),
+        ("局部变量与字典写不误判", p5_local_cache, []),
+        ("配置副本读取不误判", p5_getter_copy, []),
         ("语法错误不崩", broken, []),
         ("模块级 marker 合法放行", module_mark, []),
         ("模块级 marker 缺 scope 被拦", module_mark_missing, [P3]),
@@ -838,5 +1006,8 @@ def run(
             f"存量 {tolerated} 项仍在基线内（只减不增，改造后跑 --update-baseline 递减）"
         )
         return 0
-    out(f"[check_test_premises] 通过：{len(files)} 个文件无空库前提断言 / 逐例重装 / 无分类独占库 / 全局状态锁")
+    out(
+        f"[check_test_premises] 通过：{len(files)} 个文件无空库前提断言 / 逐例重装 / "
+        "无分类独占库 / 全局状态锁 / 装配状态写入"
+    )
     return 0

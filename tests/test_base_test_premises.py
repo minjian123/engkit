@@ -381,3 +381,57 @@ def test_tally_and_write_baseline(tmp_path: Path) -> None:
         {"file": "a.py", "code": "P4", "count": 1},
         {"file": "b.py", "code": "P1", "count": 2},
     ]
+
+
+def test_dotted_and_write_targets_edges(tmp_path: Path) -> None:
+    """P5 辅助函数：属性链拼装、解包展开与无法识别节点返回空串。"""
+
+    def value(source: str) -> ast.expr:
+        return ast.parse(source).body[0].value  # type: ignore[attr-defined]
+
+    assert test_premises._dotted(ast.Constant(value=1)) == ""
+    assert test_premises._dotted(value("a")) == "a"
+    assert test_premises._dotted(value("a.b")) == "a.b"
+    assert test_premises._dotted(value("f()")) == "f()"
+    assert test_premises._dotted(value("a.b()")) == "a.b()"
+
+    target = ast.parse("a, [b, *c] = 1, [2, 3]").body[0].targets[0]  # type: ignore[attr-defined]
+    names = [test_premises._dotted(leaf) for leaf in test_premises._write_targets(target)]
+    assert names == ["a", "b", "c"]
+    assert test_premises._write_targets(ast.Module(body=[], type_ignores=[])) == []
+    assert test_premises._dotted(ast.Call(func=ast.Constant(value=1), args=[], keywords=[])) == ""
+
+
+def test_p5_state_write_variants(tmp_path: Path) -> None:
+    """P5：解包 / 增量 / 注解 / 多层下标 / 容器识别与容器方法边界。"""
+    rule = config(tmp_path).test_premises_rules
+    assert rule is not None
+
+    def hits(source: str) -> list[str]:
+        return [hit.code for hit in test_premises.scan_hits("svc/tests/test_x.py", source, rule)]
+
+    assert hits("def test_a(app):\n    app.state.a, app.state.b = 1, 2\n") == ["P5", "P5"]
+    assert hits("def test_a(app):\n    [app.state.a, *rest] = [1]\n") == ["P5"]
+    assert hits("def test_a(app):\n    app.state.a += 1\n") == ["P5"]
+    assert hits("def test_a(app):\n    app.state.a: int\n") == []
+    assert hits("def test_a(app):\n    app.state.a: int = 1\n") == ["P5"]
+    assert hits("def test_a(app):\n    app.state.x['k'] = 1\n") == ["P5"]
+    assert hits("def test_a(app):\n    app.dependency_overrides['k']['n'] = 1\n") == ["P5"]
+    assert hits("def test_a(app, dep):\n    app.dependency_overrides.update({dep: None})\n") == ["P5"]
+    assert hits("def test_a(app):\n    app.state.items()\n") == []
+    assert hits("def test_a(other):\n    other.clear()\n") == []
+    assert hits("def test_a():\n    setattr()\n") == []
+    assert hits("def test_a(monkeypatch, obj):\n    monkeypatch.delattr(obj, 'x')\n") == []
+
+    scanner = test_premises._Scanner("svc/tests/test_x.py", rule, [])
+    assert not scanner._is_state_container("")
+    assert scanner._is_state_container("get_settings()")
+    assert not scanner._is_state_container("other()")
+    assert scanner._is_state_container("settings")
+    assert scanner._is_state_container("settings.app")
+    assert scanner._is_state_container("app.dependency_overrides")
+    assert scanner._is_state_container("app.state")
+    assert scanner._is_state_container("app.state.x")
+    assert not scanner._is_state_container("state")
+    assert not scanner._is_state_container("obj.settings")
+    assert not scanner._is_state_container("client")
