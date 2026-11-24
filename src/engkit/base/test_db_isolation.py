@@ -295,6 +295,7 @@ class _Scanner(ast.NodeVisitor):
         self._raw_engines: set[str] = set()
         self._raw_factories: set[str] = set()
         self._raw_sessions: set[str] = set()
+        self._delete_with_where: set[int] = set()
 
     def _scope(self, node: ast.AST) -> None:
         """进入作用域：带 marker 时整体放行；函数作用域的追踪集合不外泄给兄弟函数。
@@ -474,6 +475,15 @@ class _Scanner(ast.NodeVisitor):
             node: 调用节点。
         """
         name = _call_name(node)
+        # `delete(X).where(...)` 的外层调用先于内层被访问：在这里登记「已带过滤条件」的内层
+        # `delete(X)` 节点，避免把链式写法误判成「无 where 的全表删除」。
+        func = node.func
+        if (
+            isinstance(func, ast.Attribute)
+            and isinstance(func.value, ast.Call)
+            and _call_name(func.value) == _DELETE_NAME
+        ):
+            self._delete_with_where.add(id(func.value))
         if self.gate_mode:
             if name in self.rule.engine_factories and not _engine_on_memory(node, self.rule):
                 self._report(
@@ -493,7 +503,13 @@ class _Scanner(ast.NodeVisitor):
             self._report(node, G3, f"G3 共享库 DDL：{name}() 会建 / 删共享库的表（确需请打 own_db 白名单）")
         if name in self.rule.wait_calls:
             self._report(node, G4, f"G4 假等待：{name}() 取代了确定性断言（改为轮询条件 / 等事件）")
-        if name == _DELETE_NAME and self.sql_delete and isinstance(node.func, ast.Name) and len(node.args) == 1:
+        if (
+            name == _DELETE_NAME
+            and self.sql_delete
+            and isinstance(node.func, ast.Name)
+            and len(node.args) == 1
+            and id(node) not in self._delete_with_where
+        ):
             self._report(node, G3, "G3 清理他人数据：delete() 未带 where 条件（单库叠加下会删掉他人数据）")
         if name in _SQL_CALLS:
             self._check_raw_sql(node)

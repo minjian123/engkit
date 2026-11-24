@@ -396,3 +396,20 @@ def test_gate_bypass_baseline_only_shrinks(tmp_path: Path, capsys: pytest.Captur
     assert test_db_isolation.run(cfg) == 1
     out = capsys.readouterr().out
     assert "G5" in out and "support/extra.py" in out
+
+
+DELETE_CHAIN = """from sqlalchemy import delete
+
+
+async def test_purge(session, model, key):
+    await session.execute(delete(model).where(model.key == key))
+    await session.execute(delete(model))
+"""
+
+
+def test_delete_with_where_chain_not_flagged(tmp_path: Path) -> None:
+    """`delete(X).where(...)` 链式写法有过滤条件，不算无 where；同文件裸 `delete(X)` 仍判。"""
+    rule = config(tmp_path).test_db_isolation_rules
+    assert rule is not None
+    problems = test_db_isolation.scan_text("src/tests/test_purge.py", DELETE_CHAIN, rule)
+    assert len([item for item in problems if "delete()" in item]) == 1
