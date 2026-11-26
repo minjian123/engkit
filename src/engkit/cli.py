@@ -81,7 +81,7 @@ def _build_parser() -> argparse.ArgumentParser:
     selected.add_argument("--pytest-cmd", default="", help="执行器前缀（缺省取配置）")
     selected.add_argument("--pytest-cwd", default="", help="工作目录（缺省取配置）")
     selected.add_argument("--pytest-arg", action="append", default=[], help="透传 pytest 参数")
-    selected.add_argument("--jobs", default=preflight.DEFAULT_JOBS, help="并行档位：auto / 正整数 / off")
+    selected.add_argument("--jobs", default=None, help="并行档位：auto / 正整数 / off（缺省取配置 [pytest].jobs）")
     selected.add_argument("--cov", dest="cov", action="store_true", default=True, help="开启覆盖率门禁（缺省开）")
     selected.add_argument("--no-cov", dest="cov", action="store_false", help="跳过覆盖率门禁")
     selected.add_argument("--cov-fail-under", type=float, default=None, help="门禁阈值（缺省取配置）")
@@ -95,7 +95,7 @@ def _build_parser() -> argparse.ArgumentParser:
     changed.add_argument("--changed-file", action="append", default=[], help="显式变更文件（可重复）")
     changed.add_argument("--changed-file-list", default="", help="变更清单文件")
     changed.add_argument("--no-steps", action="store_true", help="跳过 `[[devloop.steps]]` 附加步骤")
-    changed.add_argument("--jobs", default=preflight.DEFAULT_JOBS, help="并行档位：auto / 正整数 / off")
+    changed.add_argument("--jobs", default=None, help="并行档位：auto / 正整数 / off（缺省取配置 [pytest].jobs）")
     changed.add_argument("--timeout", type=float, default=0.0, help="后端单轮超时（秒；0 不设限）")
     changed.add_argument("--no-lint", action="store_true", help="跳过改动文件 ruff")
     changed.add_argument("--no-frontend", action="store_true", help="跳过前端受影响包")
@@ -135,7 +135,7 @@ def _build_parser() -> argparse.ArgumentParser:
     mode.add_argument("--full", action="store_true", help="全量静态 + 定向用例（全量测试仅 CI）")
     pre.add_argument("--no-scope", action="store_true", help="全量档跳过逐工程范围")
     pre.add_argument("--no-cov", action="store_true", help="跳过覆盖率门禁")
-    pre.add_argument("--jobs", default=preflight.DEFAULT_JOBS, help="并行档位")
+    pre.add_argument("--jobs", default=None, help="并行档位（缺省取配置 [pytest].jobs）")
     pre.add_argument("--budget-seconds", type=float, default=None, help="总体预算（秒）")
     pre.add_argument("--step-seconds", type=float, default=None, help="单步预算（秒）")
     pre.add_argument("--self-test", action="store_true", help="只跑引擎自检")
@@ -144,7 +144,7 @@ def _build_parser() -> argparse.ArgumentParser:
     push.add_argument("--full", action="store_true", help="全量静态 + 定向用例（缺省按变更自动选档；全量测试只在 CI）")
     push.add_argument("--remote", default="", help="远端名（缺省取配置）")
     push.add_argument("--branch", default="", help="目标分支（缺省取配置或当前分支）")
-    push.add_argument("--jobs", default=preflight.DEFAULT_JOBS, help="并行档位（off / 0 等串行取值一律拒绝）")
+    push.add_argument("--jobs", default=None, help="并行档位（off / 0 等串行取值一律拒绝；缺省取配置 [pytest].jobs）")
     push.add_argument(
         "--budget-seconds",
         type=float,
@@ -323,6 +323,25 @@ def _load(args: argparse.Namespace) -> Config:
         Config: 配置对象。
     """
     return load_for(_root(args), getattr(args, "config", ""))
+
+
+def _resolve_jobs(args: argparse.Namespace, cfg: Config) -> str:
+    """解析并行档位：命令行显式值 > 仓配置 > 引擎缺省。
+
+    档位单源（计划表 #55）：本地预检与 CI 都从 `[pytest].jobs` 取值，避免两侧各写一个数字后漂移。
+    命令行仍保留 `--jobs` 以便单次排障覆盖，但**不再作为缺省来源**。
+
+    Args:
+        args: 解析结果（`jobs` 为 None 表示命令行未显式指定）。
+        cfg: 仓配置。
+
+    Returns:
+        str: 档位取值（`auto` / 正整数 / `off`）。
+    """
+    explicit = getattr(args, "jobs", None)
+    if explicit:
+        return str(explicit)
+    return cfg.pytest.jobs or preflight.DEFAULT_JOBS
 
 
 def _cmd_links(args: argparse.Namespace) -> int:
@@ -547,7 +566,7 @@ def _cmd_run_selected(args: argparse.Namespace) -> int:
         changed_files=tuple(args.changed_file),
         changed_file_list=args.changed_file_list,
         force_full=args.force_full,
-        jobs=args.jobs,
+        jobs=_resolve_jobs(args, cfg),
         cov=args.cov,
         cov_fail_under=args.cov_fail_under,
         max_rounds=args.max_rounds,
@@ -576,7 +595,7 @@ def _cmd_run_changed(args: argparse.Namespace) -> int:
         changed_from=args.changed_from,
         changed_files=tuple(args.changed_file),
         changed_file_list=args.changed_file_list,
-        jobs=args.jobs,
+        jobs=_resolve_jobs(args, cfg),
         timeout=args.timeout,
         lint=not args.no_lint,
         frontend=not args.no_frontend,
@@ -682,7 +701,7 @@ def _cmd_preflight(args: argparse.Namespace) -> int:
     return preflight.run_preflight(
         cfg,
         mode=mode,
-        jobs=args.jobs,
+        jobs=_resolve_jobs(args, cfg),
         no_cov=args.no_cov,
         no_scope=args.no_scope,
         step_seconds=args.step_seconds,
@@ -705,7 +724,7 @@ def _cmd_push(args: argparse.Namespace) -> int:
         full=args.full,
         remote=args.remote,
         branch=args.branch,
-        jobs=args.jobs,
+        jobs=_resolve_jobs(args, cfg),
         step_seconds=args.step_seconds,
         budget_seconds=args.budget_seconds,
     )

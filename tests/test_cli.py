@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import argparse
+import dataclasses
 import io
 import subprocess
 from pathlib import Path
@@ -488,3 +490,13 @@ def test_package_version_lazy_and_unknown_attribute() -> None:
     assert engkit.VERSION == cli.VERSION
     with pytest.raises(AttributeError):
         _ = engkit.not_exist
+
+
+def test_resolve_jobs_single_source(cfg) -> None:
+    """并行档位单源：命令行显式值优先，未指定取仓配置，配置为空回落引擎缺省。"""
+    configured = dataclasses.replace(cfg, pytest=dataclasses.replace(cfg.pytest, jobs="6"))
+    assert cli._resolve_jobs(argparse.Namespace(jobs=None), configured) == "6"
+    assert cli._resolve_jobs(argparse.Namespace(jobs="2"), configured) == "2"
+
+    unset = dataclasses.replace(cfg, pytest=dataclasses.replace(cfg.pytest, jobs=""))
+    assert cli._resolve_jobs(argparse.Namespace(jobs=None), unset) == "auto"

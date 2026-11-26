@@ -45,6 +45,7 @@ def test_load_full_config(cfg) -> None:
     assert cfg.frontend.workspace_protocol == "workspace:"
     assert cfg.coverage.plugin == "plug"
     assert cfg.pytest.max_rounds == 2
+    assert cfg.pytest.jobs == "6"
     assert cfg.backend_global.exact == ("backend/pyproject.toml",)
     assert [rule.match_prefix for rule in cfg.backend_extra] == ["backend/ops/", "scripts/tools/", "scripts/check/"]
     assert cfg.frontend_global.prefixes == ("scripts/",)

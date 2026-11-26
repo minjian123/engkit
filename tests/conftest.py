@@ -70,6 +70,7 @@ pythonpath = ["backend"]
 [pytest]
 cmd = "python -m pytest"
 cwd = "backend"
+jobs = "6"
 max_rounds = 2
 
 [preflight]

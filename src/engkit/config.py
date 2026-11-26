@@ -186,6 +186,7 @@ class PytestConfig:
     Attributes:
         cmd: 执行器前缀（空格分词）。
         cwd: 工作目录（相对仓根）。
+        jobs: 并行档位缺省值（`auto` / 正整数 / `off`）；命令行显式传入时以命令行为准。
         jobs_flag: 预检并行档位参数名（透传给子命令）。
         max_rounds: 覆盖率扩圈轮次上限。
         argv_budget: 单条 pytest 命令的路径参数字符预算（超限分批）。
@@ -193,6 +194,7 @@ class PytestConfig:
 
     cmd: str = "python -m pytest"
     cwd: str = "."
+    jobs: str = "auto"
     jobs_flag: str = "--jobs"
     max_rounds: int = 2
     argv_budget: int = 6000
@@ -2367,10 +2369,11 @@ def parse(raw: dict[str, Any], path: Path) -> Config:
     )
 
     pytest_table = _table(raw, "pytest", "pytest")
-    _check_keys(pytest_table, ("cmd", "cwd", "jobs_flag", "max_rounds", "argv_budget"), "pytest")
+    _check_keys(pytest_table, ("cmd", "cwd", "jobs", "jobs_flag", "max_rounds", "argv_budget"), "pytest")
     pytest_config = PytestConfig(
         cmd=_string(pytest_table, "cmd", "pytest", "python -m pytest"),
         cwd=_string(pytest_table, "cwd", "pytest", "."),
+        jobs=_string(pytest_table, "jobs", "pytest", "auto"),
         jobs_flag=_string(pytest_table, "jobs_flag", "pytest", "--jobs"),
         max_rounds=int(_scalar(pytest_table, "max_rounds", "pytest", int, 2)),
         argv_budget=int(_scalar(pytest_table, "argv_budget", "pytest", int, 6000)),
